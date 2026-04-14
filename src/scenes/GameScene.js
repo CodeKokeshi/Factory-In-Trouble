@@ -117,10 +117,10 @@ export default class GameScene extends Phaser.Scene {
     this.mainEndY = 640;
     this.mainLength = this.mainEndY - this.mainStartY;
 
-    this.spawnIntervalMs = 420;
+    this.spawnIntervalMs = 700;
     this.spawnTimerMs = 0;
-    this.mainSpeed = 120;
-    this.sideSpeed = 165;
+    this.mainSpeed = 72;
+    this.sideSpeed = 96;
     this.itemSpacing = FOOD_RENDER_SIZE + 4;
 
     this.nextItemId = 1;
@@ -130,6 +130,10 @@ export default class GameScene extends Phaser.Scene {
 
     this.acceptedCount = 0;
     this.rejectedCount = 0;
+
+    this.dragContext = null;
+    this.isTimeStopped = false;
+    this.timeStopOverlay = null;
 
     this.foodTypeById = FOOD_TYPES.reduce((acc, food) => {
       acc[food.id] = food;
@@ -159,9 +163,15 @@ export default class GameScene extends Phaser.Scene {
   create() {
     this.createFactoryVisuals();
     this.createHud();
+    this.setupGrabControls();
   }
 
   update(_time, delta) {
+    if (this.isTimeStopped) {
+      this.updateHud();
+      return;
+    }
+
     this.spawnTimerMs += delta;
     while (this.spawnTimerMs >= this.spawnIntervalMs) {
       this.spawnTimerMs -= this.spawnIntervalMs;
@@ -195,6 +205,11 @@ export default class GameScene extends Phaser.Scene {
       fontSize: '13px',
       color: '#cbd5e1'
     });
+
+    this.timeStopOverlay = this.add
+      .rectangle(640, 360, 1280, 720, 0x38bdf8, 0)
+      .setDepth(120)
+      .setBlendMode(Phaser.BlendModes.SCREEN);
 
     this.add.rectangle(this.mainX, 40, 78, 28, 0x334155, 1).setStrokeStyle(2, 0x64748b, 1);
     this.add
@@ -326,6 +341,7 @@ export default class GameScene extends Phaser.Scene {
 
   spawnFood() {
     const food = Phaser.Utils.Array.GetRandom(FOOD_TYPES);
+    const itemId = this.nextItemId;
 
     const textureKeys = this.textureKeysByFoodId[food.id] || [];
     let itemVisual;
@@ -343,9 +359,15 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const container = this.add.container(this.mainX, this.mainStartY, [itemVisual]).setDepth(10);
+    const grabSize = FOOD_RENDER_SIZE * 1.15;
+    const grabHandle = this.add.zone(this.mainX, this.mainStartY, grabSize, grabSize).setDepth(11);
+    grabHandle.setInteractive({ useHandCursor: true });
+    this.input.setDraggable(grabHandle);
+    grabHandle.setData('itemId', itemId);
+    grabHandle.input.cursor = 'grab';
 
     this.items.push({
-      id: this.nextItemId,
+      id: itemId,
       type: food.id,
       x: this.mainX,
       y: this.mainStartY,
@@ -355,11 +377,433 @@ export default class GameScene extends Phaser.Scene {
       laneId: null,
       attemptedRows: [false, false],
       container,
+      grabHandle,
       itemVisual,
       baseColor: food.color
     });
 
     this.nextItemId += 1;
+  }
+
+  setupGrabControls() {
+    this.input.off('dragstart', this.handleDragStart, this);
+    this.input.off('drag', this.handleDrag, this);
+    this.input.off('dragend', this.handleDragEnd, this);
+
+    this.input.on('dragstart', this.handleDragStart, this);
+    this.input.on('drag', this.handleDrag, this);
+    this.input.on('dragend', this.handleDragEnd, this);
+  }
+
+  getItemById(itemId) {
+    return this.items.find((item) => item.id === itemId) || null;
+  }
+
+  captureItemSlot(item) {
+    return {
+      state: item.state,
+      laneId: item.laneId,
+      mainPos: item.mainPos,
+      lanePos: item.lanePos,
+      attemptedRows: [...item.attemptedRows]
+    };
+  }
+
+  applyItemSlot(item, slot) {
+    item.state = slot.state;
+    item.laneId = slot.laneId ?? null;
+    item.mainPos = slot.mainPos ?? 0;
+    item.lanePos = slot.lanePos ?? 0;
+    item.attemptedRows = [...(slot.attemptedRows ?? [false, false])];
+
+    // Manual placement into a jam slot should be re-evaluated by lane logic,
+    // otherwise correct foods stay dimmed and never enter the chest.
+    if (item.state === 'jammed' && item.laneId) {
+      item.state = 'side';
+      const lane = this.lanesById[item.laneId];
+      if (lane) {
+        item.lanePos = Math.min(item.lanePos, lane.length);
+      }
+    }
+
+    this.refreshItemStateVisual(item);
+  }
+
+  getWorldPositionForSlot(slot) {
+    if (slot.state === 'main' || slot.state === 'stopped-main') {
+      return {
+        x: this.mainX,
+        y: this.mainStartY + slot.mainPos
+      };
+    }
+
+    const lane = this.lanesById[slot.laneId];
+    if (!lane) {
+      return { x: this.mainX, y: this.mainStartY };
+    }
+
+    return {
+      x: this.mainX + lane.direction * slot.lanePos,
+      y: lane.y
+    };
+  }
+
+  findSwapTargetAt(draggedItem, worldX, worldY) {
+    const threshold = FOOD_RENDER_SIZE * 0.95;
+    let nearest = null;
+    let nearestDist = Number.POSITIVE_INFINITY;
+
+    for (const item of this.items) {
+      if (item.id === draggedItem.id || item.state === 'consuming') {
+        continue;
+      }
+
+      const dist = Phaser.Math.Distance.Between(worldX, worldY, item.x, item.y);
+      if (dist <= threshold && dist < nearestDist) {
+        nearest = item;
+        nearestDist = dist;
+      }
+    }
+
+    return nearest;
+  }
+
+  buildLaneDropSlot(item, worldX, worldY) {
+    const yTolerance = FOOD_RENDER_SIZE * 0.9;
+    const sideSelectTolerance = 10;
+    const edgeSlack = FOOD_RENDER_SIZE * 0.45;
+
+    let selectedLane = null;
+    let selectedScore = Number.POSITIVE_INFINITY;
+
+    for (const laneConfig of LANE_LAYOUT) {
+      const lane = this.lanesById[laneConfig.id];
+      const yDist = Math.abs(worldY - lane.y);
+      if (yDist > yTolerance) {
+        continue;
+      }
+
+      if (lane.direction < 0 && worldX > this.mainX + sideSelectTolerance) {
+        continue;
+      }
+      if (lane.direction > 0 && worldX < this.mainX - sideSelectTolerance) {
+        continue;
+      }
+
+      const projectedPos = lane.direction < 0 ? this.mainX - worldX : worldX - this.mainX;
+      if (projectedPos < -edgeSlack || projectedPos > lane.length + edgeSlack) {
+        continue;
+      }
+
+      const score = yDist + Math.abs(projectedPos - lane.length * 0.5) * 0.01;
+      if (score < selectedScore) {
+        selectedScore = score;
+        selectedLane = lane;
+      }
+    }
+
+    if (!selectedLane) {
+      return null;
+    }
+
+    const desiredPosRaw = selectedLane.direction < 0 ? this.mainX - worldX : worldX - this.mainX;
+    const desiredPos = Phaser.Math.Clamp(desiredPosRaw, 0, selectedLane.length);
+    const resolvedPos = this.findNearestAvailableLanePos(selectedLane.id, desiredPos, item.id);
+
+    if (resolvedPos === null) {
+      return null;
+    }
+
+    return {
+      state: 'side',
+      laneId: selectedLane.id,
+      mainPos: item.mainPos,
+      lanePos: resolvedPos,
+      attemptedRows: [...item.attemptedRows]
+    };
+  }
+
+  findNearestAvailableLanePos(laneId, desiredPos, excludedItemId) {
+    const lane = this.lanesById[laneId];
+    if (!lane) {
+      return null;
+    }
+
+    const clampedPos = Phaser.Math.Clamp(desiredPos, 0, lane.length);
+    if (this.isLanePosFree(laneId, clampedPos, excludedItemId)) {
+      return clampedPos;
+    }
+
+    const maxOffset = Math.ceil(lane.length);
+    for (let offset = 1; offset <= maxOffset; offset += 1) {
+      const left = clampedPos - offset;
+      if (left >= 0 && this.isLanePosFree(laneId, left, excludedItemId)) {
+        return left;
+      }
+
+      const right = clampedPos + offset;
+      if (right <= lane.length && this.isLanePosFree(laneId, right, excludedItemId)) {
+        return right;
+      }
+    }
+
+    return null;
+  }
+
+  isLanePosFree(laneId, lanePos, excludedItemId) {
+    for (const item of this.items) {
+      if (item.id === excludedItemId) {
+        continue;
+      }
+
+      if (item.state === 'consuming') {
+        continue;
+      }
+
+      if (item.laneId !== laneId) {
+        continue;
+      }
+
+      if (item.state !== 'side' && item.state !== 'jammed') {
+        continue;
+      }
+
+      if (Math.abs(item.lanePos - lanePos) < this.itemSpacing) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  handleDragStart(_pointer, gameObject) {
+    if (this.dragContext) {
+      return;
+    }
+
+    const itemId = gameObject.getData('itemId');
+    const item = this.getItemById(itemId);
+    if (!item || item.state === 'consuming') {
+      return;
+    }
+
+    this.dragContext = {
+      itemId,
+      fromSlot: this.captureItemSlot(item)
+    };
+
+    this.setTimeStopped(true);
+
+    gameObject.input.cursor = 'grabbing';
+    item.container.setDepth(220);
+    item.grabHandle.setDepth(221);
+    this.tweens.killTweensOf(item.container);
+    this.tweens.add({
+      targets: item.container,
+      scaleX: 1.16,
+      scaleY: 1.16,
+      duration: 110,
+      ease: 'Cubic.Out'
+    });
+  }
+
+  handleDrag(_pointer, gameObject, dragX, dragY) {
+    if (!this.dragContext || this.dragContext.itemId !== gameObject.getData('itemId')) {
+      return;
+    }
+
+    const item = this.getItemById(this.dragContext.itemId);
+    if (!item) {
+      return;
+    }
+
+    item.x = dragX;
+    item.y = dragY;
+    item.container.setPosition(dragX, dragY);
+    item.grabHandle.setPosition(dragX, dragY);
+  }
+
+  handleDragEnd(pointer, gameObject) {
+    if (!this.dragContext || this.dragContext.itemId !== gameObject.getData('itemId')) {
+      return;
+    }
+
+    const draggedItem = this.getItemById(this.dragContext.itemId);
+    if (!draggedItem) {
+      this.finishDragResolution();
+      return;
+    }
+
+    const dropX = pointer.worldX ?? pointer.x;
+    const dropY = pointer.worldY ?? pointer.y;
+    const swapTarget = this.findSwapTargetAt(draggedItem, dropX, dropY);
+
+    if (swapTarget) {
+      this.animateSwapWithTarget(draggedItem, swapTarget, this.dragContext.fromSlot);
+      return;
+    }
+
+    const laneDropSlot = this.buildLaneDropSlot(draggedItem, dropX, dropY);
+    if (laneDropSlot) {
+      this.animateReturnToSlot(draggedItem, laneDropSlot);
+      return;
+    }
+
+    this.animateReturnToSlot(draggedItem, this.dragContext.fromSlot);
+  }
+
+  animateReturnToSlot(item, slot) {
+    this.applyItemSlot(item, slot);
+    const destination = this.getWorldPositionForSlot(slot);
+
+    this.tweens.killTweensOf(item.container);
+    this.tweens.add({
+      targets: item.container,
+      x: destination.x,
+      y: destination.y,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 185,
+      ease: 'Back.Out',
+      onUpdate: () => {
+        item.x = item.container.x;
+        item.y = item.container.y;
+        item.grabHandle.setPosition(item.x, item.y);
+      },
+      onComplete: () => {
+        item.x = destination.x;
+        item.y = destination.y;
+        item.container.setPosition(destination.x, destination.y);
+        item.grabHandle.setPosition(destination.x, destination.y);
+        item.container.setDepth(10);
+        item.grabHandle.setDepth(11);
+        this.finishDragResolution();
+      }
+    });
+  }
+
+  animateSwapWithTarget(draggedItem, targetItem, draggedOriginSlot) {
+    const targetSlot = this.captureItemSlot(targetItem);
+
+    this.applyItemSlot(draggedItem, targetSlot);
+    this.applyItemSlot(targetItem, draggedOriginSlot);
+
+    const draggedDestination = this.getWorldPositionForSlot(targetSlot);
+    const targetDestination = this.getWorldPositionForSlot(draggedOriginSlot);
+
+    targetItem.container.setDepth(180);
+    targetItem.grabHandle.setDepth(181);
+
+    let completedTweens = 0;
+    const onTweenComplete = () => {
+      completedTweens += 1;
+      if (completedTweens < 2) {
+        return;
+      }
+
+      draggedItem.container.setDepth(10);
+      draggedItem.grabHandle.setDepth(11);
+      targetItem.container.setDepth(10);
+      targetItem.grabHandle.setDepth(11);
+      this.finishDragResolution();
+    };
+
+    this.tweens.killTweensOf(draggedItem.container);
+    this.tweens.add({
+      targets: draggedItem.container,
+      x: draggedDestination.x,
+      y: draggedDestination.y,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 190,
+      ease: 'Cubic.Out',
+      onUpdate: () => {
+        draggedItem.x = draggedItem.container.x;
+        draggedItem.y = draggedItem.container.y;
+        draggedItem.grabHandle.setPosition(draggedItem.x, draggedItem.y);
+      },
+      onComplete: () => {
+        draggedItem.x = draggedDestination.x;
+        draggedItem.y = draggedDestination.y;
+        draggedItem.grabHandle.setPosition(draggedDestination.x, draggedDestination.y);
+        onTweenComplete();
+      }
+    });
+
+    this.tweens.killTweensOf(targetItem.container);
+    this.tweens.add({
+      targets: targetItem.container,
+      x: targetDestination.x,
+      y: targetDestination.y,
+      scaleX: 1.08,
+      scaleY: 1.08,
+      duration: 95,
+      yoyo: true,
+      ease: 'Sine.Out',
+      onUpdate: () => {
+        targetItem.x = targetItem.container.x;
+        targetItem.y = targetItem.container.y;
+        targetItem.grabHandle.setPosition(targetItem.x, targetItem.y);
+      },
+      onComplete: () => {
+        targetItem.x = targetDestination.x;
+        targetItem.y = targetDestination.y;
+        targetItem.grabHandle.setPosition(targetDestination.x, targetDestination.y);
+        onTweenComplete();
+      }
+    });
+  }
+
+  finishDragResolution() {
+    if (!this.dragContext) {
+      this.setTimeStopped(false);
+      return;
+    }
+
+    const draggedItem = this.getItemById(this.dragContext.itemId);
+    if (draggedItem?.grabHandle?.input) {
+      draggedItem.grabHandle.input.cursor = 'grab';
+      draggedItem.container.setScale(1);
+      draggedItem.container.setDepth(10);
+      draggedItem.grabHandle.setDepth(11);
+    }
+
+    this.dragContext = null;
+    this.setTimeStopped(false);
+  }
+
+  setTimeStopped(shouldStop) {
+    if (this.isTimeStopped === shouldStop) {
+      return;
+    }
+
+    this.isTimeStopped = shouldStop;
+
+    if (!this.timeStopOverlay) {
+      return;
+    }
+
+    this.tweens.killTweensOf(this.timeStopOverlay);
+    this.tweens.add({
+      targets: this.timeStopOverlay,
+      alpha: shouldStop ? 0.09 : 0,
+      duration: shouldStop ? 90 : 120,
+      ease: shouldStop ? 'Quad.Out' : 'Quad.In'
+    });
+  }
+
+  refreshItemStateVisual(item) {
+    if (item.state === 'jammed') {
+      this.applyItemStateTint(item, 0x64748b);
+      return;
+    }
+
+    if (item.state === 'stopped-main') {
+      this.applyItemStateTint(item, 0x94a3b8);
+      return;
+    }
+
+    this.clearItemTint(item);
   }
 
   getClosestMainPosToEntry() {
@@ -510,6 +954,9 @@ export default class GameScene extends Phaser.Scene {
     this.clearItemTint(item);
     item.container.setAlpha(1);
     item.container.setScale(1);
+    if (item.grabHandle?.input) {
+      item.grabHandle.disableInteractive();
+    }
 
     this.playChestReceiveAnimation(lane);
 
@@ -568,6 +1015,9 @@ export default class GameScene extends Phaser.Scene {
     if (item.container && item.container.active) {
       item.container.destroy();
     }
+    if (item.grabHandle && item.grabHandle.active) {
+      item.grabHandle.destroy();
+    }
   }
 
   syncItemPositions() {
@@ -585,6 +1035,9 @@ export default class GameScene extends Phaser.Scene {
 
       if (item.container.active) {
         item.container.setPosition(item.x, item.y);
+      }
+      if (item.grabHandle?.active) {
+        item.grabHandle.setPosition(item.x, item.y);
       }
     }
   }
@@ -627,9 +1080,10 @@ export default class GameScene extends Phaser.Scene {
   updateHud() {
     const mainMovingCount = this.items.filter((item) => item.state === 'main').length;
     const mainStoppedCount = this.items.filter((item) => item.state === 'stopped-main').length;
+    const flowState = this.isTimeStopped ? 'PAUSED' : 'RUNNING';
 
     this.statsText.setText(
-      `Accepted: ${this.acceptedCount}  |  Rejected: ${this.rejectedCount}  |  Main moving: ${mainMovingCount}  |  Main stopped: ${mainStoppedCount}  |  Active: ${this.items.length}`
+      `Accepted: ${this.acceptedCount}  |  Rejected: ${this.rejectedCount}  |  Main moving: ${mainMovingCount}  |  Main stopped: ${mainStoppedCount}  |  Active: ${this.items.length}  |  Flow: ${flowState}`
     );
 
     const jamSummary = LANE_LAYOUT.map((laneConfig) => {
