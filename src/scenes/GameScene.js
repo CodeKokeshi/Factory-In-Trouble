@@ -142,6 +142,25 @@ const CLAW_ROWS = [
   { y: 500, leftLaneId: 'bot_left', rightLaneId: 'bot_right' }
 ];
 
+const ROW_INDEX_BY_FOOD_TYPE = (() => {
+  const desiredTypeByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
+    acc[lane.id] = lane.desiredType;
+    return acc;
+  }, {});
+
+  return CLAW_ROWS.reduce((acc, row, rowIndex) => {
+    const leftType = desiredTypeByLaneId[row.leftLaneId];
+    const rightType = desiredTypeByLaneId[row.rightLaneId];
+    if (leftType) {
+      acc[leftType] = rowIndex;
+    }
+    if (rightType) {
+      acc[rightType] = rowIndex;
+    }
+    return acc;
+  }, {});
+})();
+
 export default class GameScene extends Phaser.Scene {
   constructor() {
     super('GameScene');
@@ -152,7 +171,7 @@ export default class GameScene extends Phaser.Scene {
     this.mainLength = this.mainEndY - this.mainStartY;
 
     this.spawnTimerMs = 0;
-    this.elapsedSeconds = 0;
+    this.spawnBlockedThisFrame = false;
 
     this.baseMainSpeed = 70;
     this.baseSideSpeed = 105;
@@ -160,7 +179,11 @@ export default class GameScene extends Phaser.Scene {
     this.maxSideSpeed = 325;
     this.baseSpawnIntervalMs = 850;
     this.minSpawnIntervalMs = 340;
-    this.difficultyRampPerSecond = 0.04;
+
+    this.scoreRampStepPoints = 5000;
+    this.mainSpeedPerStep = 8;
+    this.sideSpeedPerStep = 12;
+    this.spawnIntervalDecreasePerStepMs = 45;
 
     this.mainSpeed = this.baseMainSpeed;
     this.sideSpeed = this.baseSideSpeed;
@@ -350,12 +373,23 @@ export default class GameScene extends Phaser.Scene {
     const scaledDeltaMs = delta * this.simTimeScale;
     const dt = scaledDeltaMs / 1000;
 
-    this.updateDifficulty(dt);
+    this.updateDifficulty();
+
+    this.spawnBlockedThisFrame = false;
 
     this.spawnTimerMs += scaledDeltaMs;
-    while (this.spawnTimerMs >= this.spawnIntervalMs) {
-      this.spawnTimerMs -= this.spawnIntervalMs;
-      this.spawnFoodIfSpace();
+    let spawnSafety = 0;
+    while (this.spawnTimerMs >= this.spawnIntervalMs && spawnSafety < 6) {
+      spawnSafety += 1;
+      const spawned = this.spawnFoodIfSpace();
+      if (spawned) {
+        this.spawnTimerMs -= this.spawnIntervalMs;
+        continue;
+      }
+
+      this.spawnBlockedThisFrame = true;
+      this.spawnTimerMs = this.spawnIntervalMs;
+      break;
     }
 
     this.updateMainBelt(dt);
@@ -384,18 +418,20 @@ export default class GameScene extends Phaser.Scene {
   }
 
   isSystemFullyClogged() {
-    const closestToEntry = this.getClosestMainPosToEntry();
-    const entryBlocked = closestToEntry !== null && closestToEntry < this.itemSpacing;
-    if (!entryBlocked) {
+    if (!this.spawnBlockedThisFrame) {
       return false;
     }
 
-    const mainStopReached = this.items.some((item) => item.state === 'stopped-main');
-    if (!mainStopReached) {
+    const allLaneIntakesBlocked = LANE_LAYOUT.every((laneConfig) => !this.canEnterLane(laneConfig.id));
+    if (!allLaneIntakesBlocked) {
       return false;
     }
 
-    return LANE_LAYOUT.every((laneConfig) => !this.canEnterLane(laneConfig.id));
+    const mainIsStuck = this.items.some(
+      (item) => item.state === 'stopped-main' || (item.state === 'main' && typeof item.holdMainPos === 'number')
+    );
+
+    return mainIsStuck;
   }
 
   triggerGameOver() {
@@ -496,6 +532,16 @@ export default class GameScene extends Phaser.Scene {
         this.add.rectangle(laneConfig.chestX, laneConfig.y, 114, 56, 0x334155, 1).setStrokeStyle(3, laneColor, 1);
       }
 
+      this.add
+        .text(laneConfig.chestX, laneConfig.y + 56, laneConfig.label, {
+          fontFamily: 'Consolas',
+          fontSize: '14px',
+          color: '#e2e8f0'
+        })
+        .setOrigin(0.5)
+        .setDepth(8)
+        .setShadow(0, 2, '#000000', 8);
+
       const clawX = this.mainX + laneConfig.direction * CLAW_OFFSET_X;
       const clawMarker = this.add.circle(clawX, laneConfig.y, CLAW_RADIUS, 0x94a3b8, 1).setStrokeStyle(2, laneColor, 1);
 
@@ -537,26 +583,26 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  updateDifficulty(dt) {
-    if (dt <= 0) {
-      return;
-    }
+  updateDifficulty() {
+    const steps = this.scoreRampStepPoints > 0 ? Math.floor(this.score / this.scoreRampStepPoints) : 0;
 
-    this.elapsedSeconds += dt;
-    const factor = Phaser.Math.Clamp(1 + this.elapsedSeconds * this.difficultyRampPerSecond, 1, 5);
+    const targetMainSpeed = this.baseMainSpeed + steps * this.mainSpeedPerStep;
+    const targetSideSpeed = this.baseSideSpeed + steps * this.sideSpeedPerStep;
+    const targetSpawnIntervalMs = this.baseSpawnIntervalMs - steps * this.spawnIntervalDecreasePerStepMs;
 
-    this.mainSpeed = Math.min(this.baseMainSpeed * factor, this.maxMainSpeed);
-    this.sideSpeed = Math.min(this.baseSideSpeed * factor, this.maxSideSpeed);
-    this.spawnIntervalMs = Math.max(this.minSpawnIntervalMs, this.baseSpawnIntervalMs / factor);
+    this.mainSpeed = Phaser.Math.Clamp(targetMainSpeed, this.baseMainSpeed, this.maxMainSpeed);
+    this.sideSpeed = Phaser.Math.Clamp(targetSideSpeed, this.baseSideSpeed, this.maxSideSpeed);
+    this.spawnIntervalMs = Phaser.Math.Clamp(targetSpawnIntervalMs, this.minSpawnIntervalMs, this.baseSpawnIntervalMs);
   }
 
   spawnFoodIfSpace() {
     const closestToEntry = this.getClosestMainPosToEntry();
     if (closestToEntry !== null && closestToEntry < this.itemSpacing) {
-      return;
+      return false;
     }
 
     this.spawnFood();
+    return true;
   }
 
   spawnFood() {
@@ -605,7 +651,9 @@ export default class GameScene extends Phaser.Scene {
       lanePos: 0,
       state: 'main',
       laneId: null,
-      attemptedRows: [false, false],
+      targetRowIndex: ROW_INDEX_BY_FOOD_TYPE[food.id] ?? 0,
+      preferRight: Math.random() < 0.5,
+      holdMainPos: null,
       motionLock: false,
       container,
       grabHandle,
@@ -635,8 +683,7 @@ export default class GameScene extends Phaser.Scene {
       state: item.state,
       laneId: item.laneId,
       mainPos: item.mainPos,
-      lanePos: item.lanePos,
-      attemptedRows: [...item.attemptedRows]
+      lanePos: item.lanePos
     };
   }
 
@@ -645,7 +692,7 @@ export default class GameScene extends Phaser.Scene {
     item.laneId = slot.laneId ?? null;
     item.mainPos = slot.mainPos ?? 0;
     item.lanePos = slot.lanePos ?? 0;
-    item.attemptedRows = [...(slot.attemptedRows ?? [false, false])];
+    item.holdMainPos = null;
 
     // Manual placement into a jam slot should be re-evaluated by lane logic,
     // otherwise correct foods stay dimmed and never enter the chest.
@@ -749,8 +796,7 @@ export default class GameScene extends Phaser.Scene {
       state: 'side',
       laneId: selectedLane.id,
       mainPos: item.mainPos,
-      lanePos: resolvedPos,
-      attemptedRows: [...item.attemptedRows]
+      lanePos: resolvedPos
     };
   }
 
@@ -1068,15 +1114,17 @@ export default class GameScene extends Phaser.Scene {
     let frontPos = null;
     for (const item of mainItems) {
       const maxAllowedPos = frontPos === null ? this.mainLength : Math.max(0, frontPos - this.itemSpacing);
+      const holdPos = typeof item.holdMainPos === 'number' ? item.holdMainPos : Number.POSITIVE_INFINITY;
+      const maxAllowedWithHold = Math.min(maxAllowedPos, holdPos);
 
       if (item.state === 'main') {
         if (item.motionLock) {
-          item.mainPos = Math.min(item.mainPos, maxAllowedPos);
+          item.mainPos = Math.min(item.mainPos, maxAllowedWithHold);
         } else {
-          item.mainPos = Math.min(item.mainPos + this.mainSpeed * dt, maxAllowedPos);
+          item.mainPos = Math.min(item.mainPos + this.mainSpeed * dt, maxAllowedWithHold);
         }
       } else {
-        item.mainPos = Math.min(item.mainPos, maxAllowedPos);
+        item.mainPos = Math.min(item.mainPos, maxAllowedWithHold);
       }
 
       if (item.mainPos >= this.mainLength) {
@@ -1092,43 +1140,70 @@ export default class GameScene extends Phaser.Scene {
   }
 
   runClawTransfers() {
-    const movingMainItems = this.items
-      .filter((item) => item.state === 'main' && !item.motionLock)
-      .sort((a, b) => b.mainPos - a.mainPos);
+    const movingMainItems = this.items.filter((item) => item.state === 'main' && !item.motionLock);
+    if (movingMainItems.length === 0) {
+      return;
+    }
 
-    for (const item of movingMainItems) {
-      for (let rowIndex = 0; rowIndex < CLAW_ROWS.length; rowIndex += 1) {
-        if (item.attemptedRows[rowIndex]) {
+    const reachEpsilon = 0.001;
+
+    for (let rowIndex = 0; rowIndex < CLAW_ROWS.length; rowIndex += 1) {
+      const row = CLAW_ROWS[rowIndex];
+      const rowPos = row.y - this.mainStartY;
+
+      let candidateItem = null;
+      let candidateMainPos = -Infinity;
+
+      for (const item of movingMainItems) {
+        if (typeof item.targetRowIndex !== 'number') {
+          item.targetRowIndex = ROW_INDEX_BY_FOOD_TYPE[item.type] ?? 0;
+        }
+        if (item.targetRowIndex !== rowIndex) {
           continue;
         }
 
-        const row = CLAW_ROWS[rowIndex];
-        const rowPos = row.y - this.mainStartY;
-        if (item.mainPos < rowPos) {
+        if (typeof item.preferRight !== 'boolean') {
+          item.preferRight = Math.random() < 0.5;
+        }
+
+        const isHeldHere = typeof item.holdMainPos === 'number' && Math.abs(item.holdMainPos - rowPos) < 0.001;
+        const hasReachedRow = item.mainPos + reachEpsilon >= rowPos;
+        if (!isHeldHere && !hasReachedRow) {
           continue;
         }
 
-        item.attemptedRows[rowIndex] = true;
-        this.tryTransferAtRow(item, row);
-
-        if (item.state !== 'main') {
-          break;
+        if (item.mainPos > candidateMainPos) {
+          candidateItem = item;
+          candidateMainPos = item.mainPos;
         }
       }
-    }
-  }
 
-  tryTransferAtRow(item, row) {
-    const candidateLaneIds =
-      Math.random() < 0.5 ? [row.leftLaneId, row.rightLaneId] : [row.rightLaneId, row.leftLaneId];
-
-    for (const laneId of candidateLaneIds) {
-      if (!this.canEnterLane(laneId)) {
+      if (!candidateItem) {
         continue;
       }
 
-      this.transferToLane(item, laneId);
-      return;
+      const laneOrder = candidateItem.preferRight
+        ? [row.rightLaneId, row.leftLaneId]
+        : [row.leftLaneId, row.rightLaneId];
+
+      let transferred = false;
+      for (const laneId of laneOrder) {
+        if (!this.canEnterLane(laneId)) {
+          continue;
+        }
+
+        // Clamp to the claw row so transfer animation always begins at the claw.
+        candidateItem.mainPos = Math.min(candidateItem.mainPos, rowPos);
+        candidateItem.holdMainPos = null;
+        this.transferToLane(candidateItem, laneId);
+        transferred = true;
+        break;
+      }
+
+      if (!transferred) {
+        candidateItem.holdMainPos = rowPos;
+        candidateItem.mainPos = Math.min(candidateItem.mainPos, rowPos);
+      }
     }
   }
 
@@ -1153,6 +1228,7 @@ export default class GameScene extends Phaser.Scene {
     const destinationX = lane.intakeX;
     const destinationY = lane.y;
 
+    item.holdMainPos = null;
     item.state = 'side';
     item.laneId = laneId;
     item.lanePos = 0;
