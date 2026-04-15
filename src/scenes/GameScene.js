@@ -3,6 +3,40 @@ import Phaser from 'phaser';
 const MAX_SPRITES_PER_TYPE = 24;
 const FOOD_RENDER_SIZE = 42;
 
+const MAIN_BELT_WIDTH = 56;
+const MAIN_BELT_HEIGHT = 560;
+const SIDE_BELT_HEIGHT = 26;
+
+const CLAW_OFFSET_X = 38;
+const CLAW_RADIUS = 12;
+const CLAW_CLEARANCE = 2;
+const SIDE_BELT_INTAKE_OFFSET = CLAW_OFFSET_X + CLAW_RADIUS + CLAW_CLEARANCE;
+
+const BELT_LINE_COLOR = 0x0f172a;
+const BELT_LINE_ALPHA = 0.38;
+
+function drawConveyorLines(graphics, { x, y, width, height, orientation, spacing, margin = 6, offset = 0 }) {
+  const left = x - width * 0.5 + margin;
+  const right = x + width * 0.5 - margin;
+  const top = y - height * 0.5 + margin;
+  const bottom = y + height * 0.5 - margin;
+
+  const phase = ((Number(offset) % spacing) + spacing) % spacing;
+
+  graphics.lineStyle(2, BELT_LINE_COLOR, BELT_LINE_ALPHA);
+
+  if (orientation === 'vertical') {
+    for (let lineY = top - spacing + phase; lineY <= bottom; lineY += spacing) {
+      graphics.lineBetween(left, lineY, right, lineY);
+    }
+    return;
+  }
+
+  for (let lineX = left - spacing + phase; lineX <= right; lineX += spacing) {
+    graphics.lineBetween(lineX, top, lineX, bottom);
+  }
+}
+
 const SPRITE_URL_GLOBS = {
   condiments: import.meta.glob('../../assets/sprites/condiments/*.png', { eager: true, import: 'default' }),
   carbs: import.meta.glob('../../assets/sprites/carb/*.png', { eager: true, import: 'default' }),
@@ -135,6 +169,9 @@ export default class GameScene extends Phaser.Scene {
     this.isTimeStopped = false;
     this.timeStopOverlay = null;
 
+    this.mainBeltLines = null;
+    this.mainBeltLineConfig = null;
+
     this.foodTypeById = FOOD_TYPES.reduce((acc, food) => {
       acc[food.id] = food;
       return acc;
@@ -172,15 +209,18 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
+    const dt = delta / 1000;
+
     this.spawnTimerMs += delta;
     while (this.spawnTimerMs >= this.spawnIntervalMs) {
       this.spawnTimerMs -= this.spawnIntervalMs;
       this.spawnFoodIfSpace();
     }
 
-    this.updateMainBelt(delta / 1000);
+    this.updateMainBelt(dt);
     this.runClawTransfers();
-    this.updateSideBelts(delta / 1000);
+    this.updateSideBelts(dt);
+    this.updateConveyorVisuals(dt);
     this.syncItemPositions();
     this.updateHud();
   }
@@ -220,7 +260,19 @@ export default class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    this.add.rectangle(this.mainX, 360, 56, 560, 0x1e293b, 1).setStrokeStyle(2, 0x475569, 1);
+    this.add.rectangle(this.mainX, 360, MAIN_BELT_WIDTH, MAIN_BELT_HEIGHT, 0x1e293b, 1).setStrokeStyle(2, 0x475569, 1);
+    this.mainBeltLines = this.add.graphics();
+    this.mainBeltLineConfig = {
+      x: this.mainX,
+      y: 360,
+      width: MAIN_BELT_WIDTH,
+      height: MAIN_BELT_HEIGHT,
+      orientation: 'vertical',
+      spacing: 20,
+      margin: 8,
+      offset: 0
+    };
+    drawConveyorLines(this.mainBeltLines, this.mainBeltLineConfig);
     this.add
       .text(this.mainX + 84, 88, 'Main Belt', {
         fontFamily: 'Segoe UI',
@@ -242,10 +294,25 @@ export default class GameScene extends Phaser.Scene {
 
     LANE_LAYOUT.forEach((laneConfig) => {
       const laneColor = this.foodTypeById[laneConfig.desiredType].color;
-      const laneWidth = Math.abs(this.mainX - laneConfig.endX);
-      const laneCenterX = (this.mainX + laneConfig.endX) * 0.5;
+      const intakeX = this.mainX + laneConfig.direction * SIDE_BELT_INTAKE_OFFSET;
+      const laneWidth = Math.abs(intakeX - laneConfig.endX);
+      const laneCenterX = (intakeX + laneConfig.endX) * 0.5;
 
-      this.add.rectangle(laneCenterX, laneConfig.y, laneWidth, 26, 0x1e293b, 1).setStrokeStyle(2, 0x475569, 1);
+      this.add
+        .rectangle(laneCenterX, laneConfig.y, laneWidth, SIDE_BELT_HEIGHT, 0x1e293b, 1)
+        .setStrokeStyle(2, 0x475569, 1);
+      const beltLines = this.add.graphics();
+      const beltLineConfig = {
+        x: laneCenterX,
+        y: laneConfig.y,
+        width: laneWidth,
+        height: SIDE_BELT_HEIGHT,
+        orientation: 'horizontal',
+        spacing: 22,
+        margin: 7,
+        offset: 0
+      };
+      drawConveyorLines(beltLines, beltLineConfig);
 
       this.add
         .text(laneCenterX, laneConfig.y - 20, `${laneConfig.label} lane`, {
@@ -282,8 +349,8 @@ export default class GameScene extends Phaser.Scene {
         })
         .setOrigin(0.5);
 
-      const clawX = this.mainX + (laneConfig.direction < 0 ? -38 : 38);
-      const clawMarker = this.add.circle(clawX, laneConfig.y, 12, 0x94a3b8, 1).setStrokeStyle(2, laneColor, 1);
+      const clawX = this.mainX + laneConfig.direction * CLAW_OFFSET_X;
+      const clawMarker = this.add.circle(clawX, laneConfig.y, CLAW_RADIUS, 0x94a3b8, 1).setStrokeStyle(2, laneColor, 1);
       this.add
         .text(clawX, laneConfig.y + 24, 'CLAW', {
           fontFamily: 'Consolas',
@@ -294,13 +361,40 @@ export default class GameScene extends Phaser.Scene {
 
       this.lanesById[laneConfig.id] = {
         ...laneConfig,
-        length: Math.abs(this.mainX - laneConfig.endX),
+        intakeX,
+        length: laneWidth,
+        beltLines,
+        beltLineConfig,
         clawMarker,
         chestSprite,
         chestBaseScale,
         chestAnimToken: 0
       };
     });
+  }
+
+  updateConveyorVisuals(dt) {
+    if (dt <= 0) {
+      return;
+    }
+
+    if (this.mainBeltLines && this.mainBeltLineConfig) {
+      const spacing = this.mainBeltLineConfig.spacing;
+      this.mainBeltLineConfig.offset = (this.mainBeltLineConfig.offset + this.mainSpeed * dt) % spacing;
+      this.mainBeltLines.clear();
+      drawConveyorLines(this.mainBeltLines, this.mainBeltLineConfig);
+    }
+
+    for (const lane of Object.values(this.lanesById)) {
+      if (!lane?.beltLines || !lane.beltLineConfig) {
+        continue;
+      }
+
+      const spacing = lane.beltLineConfig.spacing;
+      lane.beltLineConfig.offset = (lane.beltLineConfig.offset + this.sideSpeed * dt * lane.direction) % spacing;
+      lane.beltLines.clear();
+      drawConveyorLines(lane.beltLines, lane.beltLineConfig);
+    }
   }
 
   createHud() {
@@ -443,7 +537,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     return {
-      x: this.mainX + lane.direction * slot.lanePos,
+      x: lane.intakeX + lane.direction * slot.lanePos,
       y: lane.y
     };
   }
@@ -490,7 +584,7 @@ export default class GameScene extends Phaser.Scene {
         continue;
       }
 
-      const projectedPos = lane.direction < 0 ? this.mainX - worldX : worldX - this.mainX;
+      const projectedPos = lane.direction < 0 ? lane.intakeX - worldX : worldX - lane.intakeX;
       if (projectedPos < -edgeSlack || projectedPos > lane.length + edgeSlack) {
         continue;
       }
@@ -506,7 +600,7 @@ export default class GameScene extends Phaser.Scene {
       return null;
     }
 
-    const desiredPosRaw = selectedLane.direction < 0 ? this.mainX - worldX : worldX - this.mainX;
+    const desiredPosRaw = selectedLane.direction < 0 ? selectedLane.intakeX - worldX : worldX - selectedLane.intakeX;
     const desiredPos = Phaser.Math.Clamp(desiredPosRaw, 0, selectedLane.length);
     const resolvedPos = this.findNearestAvailableLanePos(selectedLane.id, desiredPos, item.id);
 
@@ -1029,7 +1123,7 @@ export default class GameScene extends Phaser.Scene {
         continue;
       } else {
         const lane = this.lanesById[item.laneId];
-        item.x = this.mainX + lane.direction * item.lanePos;
+        item.x = lane.intakeX + lane.direction * item.lanePos;
         item.y = lane.y;
       }
 
