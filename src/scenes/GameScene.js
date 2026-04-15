@@ -151,10 +151,20 @@ export default class GameScene extends Phaser.Scene {
     this.mainEndY = 640;
     this.mainLength = this.mainEndY - this.mainStartY;
 
-    this.spawnIntervalMs = 700;
     this.spawnTimerMs = 0;
-    this.mainSpeed = 72;
-    this.sideSpeed = 96;
+    this.elapsedSeconds = 0;
+
+    this.baseMainSpeed = 80;
+    this.baseSideSpeed = 120;
+    this.maxMainSpeed = 260;
+    this.maxSideSpeed = 360;
+    this.baseSpawnIntervalMs = 780;
+    this.minSpawnIntervalMs = 280;
+    this.difficultyRampPerSecond = 0.05;
+
+    this.mainSpeed = this.baseMainSpeed;
+    this.sideSpeed = this.baseSideSpeed;
+    this.spawnIntervalMs = this.baseSpawnIntervalMs;
     this.itemSpacing = FOOD_RENDER_SIZE + 4;
 
     this.nextItemId = 1;
@@ -165,9 +175,23 @@ export default class GameScene extends Phaser.Scene {
     this.acceptedCount = 0;
     this.rejectedCount = 0;
 
+    this.score = 0;
+    this.multiplier = 1;
+    this.maxMultiplier = 20;
+    this.scoreText = null;
+    this.multiplierText = null;
+
+    this.chestParticles = null;
+
+    this.isGameOver = false;
+    this.clogTimerSeconds = 0;
+    this.clogGraceSeconds = 1.4;
+    this.gameOverOverlay = null;
+    this.gameOverText = null;
+
     this.dragContext = null;
-    this.isTimeStopped = false;
-    this.timeStopOverlay = null;
+    this.simTimeScale = 1;
+    this.dragSlowMoScale = 0.18;
 
     this.mainBeltLines = null;
     this.mainBeltLineConfig = null;
@@ -199,19 +223,136 @@ export default class GameScene extends Phaser.Scene {
 
   create() {
     this.createFactoryVisuals();
-    this.createHud();
+    this.createScoreUi();
+    this.createParticles();
     this.setupGrabControls();
   }
 
-  update(_time, delta) {
-    if (this.isTimeStopped) {
-      this.updateHud();
+  createParticles() {
+    const particleTextureKey = 'fx_dot';
+    if (!this.textures.exists(particleTextureKey)) {
+      const g = this.make.graphics({ x: 0, y: 0, add: false });
+      g.fillStyle(0xffffff, 1);
+      g.fillCircle(4, 4, 4);
+      g.generateTexture(particleTextureKey, 8, 8);
+      g.destroy();
+    }
+
+    this.chestParticles = this.add
+      .particles(0, 0, particleTextureKey, {
+        frequency: -1,
+        quantity: 0,
+        lifespan: { min: 240, max: 420 },
+        speed: { min: 80, max: 240 },
+        angle: { min: 0, max: 360 },
+        gravityY: 320,
+        scale: { start: 0.85, end: 0 },
+        alpha: { start: 0.95, end: 0 },
+        blendMode: 'ADD'
+      })
+      .setDepth(60);
+  }
+
+  emitChestConsumeParticles(item, lane) {
+    if (!this.chestParticles) {
       return;
     }
 
-    const dt = delta / 1000;
+    this.chestParticles.setParticleTint(item.baseColor ?? 0xffffff);
+    this.chestParticles.explode(16, lane.chestX, lane.y);
+  }
 
-    this.spawnTimerMs += delta;
+  createScoreUi() {
+    const baseX = 18;
+    const baseY = 16;
+    const shadow = { offsetX: 0, offsetY: 2, color: '#000000', blur: 8 };
+
+    this.scoreText = this.add
+      .text(baseX, baseY, '', {
+        fontFamily: 'Consolas',
+        fontSize: '20px',
+        color: '#e2e8f0'
+      })
+      .setDepth(300)
+      .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
+
+    this.multiplierText = this.add
+      .text(baseX, baseY + 28, '', {
+        fontFamily: 'Consolas',
+        fontSize: '18px',
+        color: '#67e8f9'
+      })
+      .setDepth(300)
+      .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
+
+    this.refreshScoreUi();
+  }
+
+  refreshScoreUi() {
+    if (this.scoreText) {
+      this.scoreText.setText(`SCORE ${this.score}`);
+    }
+    if (this.multiplierText) {
+      this.multiplierText.setText(`MULT x${this.multiplier}`);
+    }
+  }
+
+  bumpUiText(textObject, scale = 1.22, duration = 105) {
+    if (!textObject) {
+      return;
+    }
+
+    this.tweens.killTweensOf(textObject);
+    textObject.setScale(1);
+    this.tweens.add({
+      targets: textObject,
+      scaleX: scale,
+      scaleY: scale,
+      duration,
+      yoyo: true,
+      ease: 'Quad.Out'
+    });
+  }
+
+  handleComboConsume() {
+    const basePoints = 100;
+    this.score += basePoints * this.multiplier;
+    this.multiplier = Math.min(this.multiplier + 1, this.maxMultiplier);
+    this.refreshScoreUi();
+    this.bumpUiText(this.scoreText, 1.06, 85);
+    this.bumpUiText(this.multiplierText, 1.22, 105);
+  }
+
+  breakCombo() {
+    if (this.multiplier <= 1) {
+      return;
+    }
+
+    this.multiplier = 1;
+    this.refreshScoreUi();
+
+    if (this.multiplierText) {
+      this.multiplierText.setColor('#fca5a5');
+      this.bumpUiText(this.multiplierText, 1.32, 95);
+      this.time.delayedCall(260, () => {
+        if (this.multiplierText?.active) {
+          this.multiplierText.setColor('#67e8f9');
+        }
+      });
+    }
+  }
+
+  update(_time, delta) {
+    if (this.isGameOver) {
+      return;
+    }
+
+    const scaledDeltaMs = delta * this.simTimeScale;
+    const dt = scaledDeltaMs / 1000;
+
+    this.updateDifficulty(dt);
+
+    this.spawnTimerMs += scaledDeltaMs;
     while (this.spawnTimerMs >= this.spawnIntervalMs) {
       this.spawnTimerMs -= this.spawnIntervalMs;
       this.spawnFoodIfSpace();
@@ -222,44 +363,90 @@ export default class GameScene extends Phaser.Scene {
     this.updateSideBelts(dt);
     this.updateConveyorVisuals(dt);
     this.syncItemPositions();
-    this.updateHud();
+
+    this.checkForGameOver(dt);
+  }
+
+  checkForGameOver(dt) {
+    if (dt <= 0 || this.isGameOver) {
+      return;
+    }
+
+    if (this.isSystemFullyClogged()) {
+      this.clogTimerSeconds += dt;
+      if (this.clogTimerSeconds >= this.clogGraceSeconds) {
+        this.triggerGameOver();
+      }
+      return;
+    }
+
+    this.clogTimerSeconds = 0;
+  }
+
+  isSystemFullyClogged() {
+    const closestToEntry = this.getClosestMainPosToEntry();
+    const entryBlocked = closestToEntry !== null && closestToEntry < this.itemSpacing;
+    if (!entryBlocked) {
+      return false;
+    }
+
+    const mainStopReached = this.items.some((item) => item.state === 'stopped-main');
+    if (!mainStopReached) {
+      return false;
+    }
+
+    return LANE_LAYOUT.every((laneConfig) => !this.canEnterLane(laneConfig.id));
+  }
+
+  triggerGameOver() {
+    if (this.isGameOver) {
+      return;
+    }
+
+    this.isGameOver = true;
+    this.setSlowMotion(false);
+
+    if (this.dragContext) {
+      const draggedItem = this.getItemById(this.dragContext.itemId);
+      if (draggedItem) {
+        draggedItem.motionLock = false;
+        this.applyItemSlot(draggedItem, this.dragContext.fromSlot);
+        const destination = this.getWorldPositionForSlot(this.dragContext.fromSlot);
+        draggedItem.x = destination.x;
+        draggedItem.y = destination.y;
+        draggedItem.container.setPosition(destination.x, destination.y);
+        draggedItem.container.setScale(1);
+        draggedItem.container.setAngle(0);
+        draggedItem.grabHandle.setPosition(destination.x, destination.y);
+      }
+
+      this.dragContext = null;
+    }
+
+    this.input.enabled = false;
+
+    this.gameOverOverlay = this.add.rectangle(640, 360, 1280, 720, 0x020617, 0.72).setDepth(380);
+    this.gameOverText = this.add
+      .text(640, 330, `SYSTEM CLOGGED\nSCORE ${this.score}`, {
+        fontFamily: 'Segoe UI',
+        fontSize: '54px',
+        align: 'center',
+        color: '#e2e8f0'
+      })
+      .setOrigin(0.5)
+      .setDepth(390)
+      .setShadow(0, 4, '#000000', 12);
+
+    this.gameOverText.setAlpha(0);
+    this.tweens.add({
+      targets: this.gameOverText,
+      alpha: 1,
+      duration: 240,
+      ease: 'Quad.Out'
+    });
   }
 
   createFactoryVisuals() {
-    this.add
-      .text(20, 18, 'Machine Prototype - Conveyor Sorting', {
-        fontFamily: 'Segoe UI',
-        fontSize: '30px',
-        color: '#e2e8f0'
-      })
-      .setShadow(0, 2, '#000000', 8);
-
-    this.add.text(20, 58, 'Flow: top entry -> middle queue -> claw grab -> side queue -> chest check', {
-      fontFamily: 'Segoe UI',
-      fontSize: '16px',
-      color: '#94a3b8'
-    });
-
-    this.add.text(20, 76, 'Rule: items cannot pass through the item in front of them on any belt.', {
-      fontFamily: 'Segoe UI',
-      fontSize: '13px',
-      color: '#cbd5e1'
-    });
-
-    this.timeStopOverlay = this.add
-      .rectangle(640, 360, 1280, 720, 0x38bdf8, 0)
-      .setDepth(120)
-      .setBlendMode(Phaser.BlendModes.SCREEN);
-
-    this.add.rectangle(this.mainX, 40, 78, 28, 0x334155, 1).setStrokeStyle(2, 0x64748b, 1);
-    this.add
-      .text(this.mainX, 40, 'INPUT', {
-        fontFamily: 'Segoe UI',
-        fontSize: '12px',
-        color: '#f8fafc'
-      })
-      .setOrigin(0.5);
-
     this.add.rectangle(this.mainX, 360, MAIN_BELT_WIDTH, MAIN_BELT_HEIGHT, 0x1e293b, 1).setStrokeStyle(2, 0x475569, 1);
     this.mainBeltLines = this.add.graphics();
     this.mainBeltLineConfig = {
@@ -273,22 +460,6 @@ export default class GameScene extends Phaser.Scene {
       offset: 0
     };
     drawConveyorLines(this.mainBeltLines, this.mainBeltLineConfig);
-    this.add
-      .text(this.mainX + 84, 88, 'Main Belt', {
-        fontFamily: 'Segoe UI',
-        fontSize: '13px',
-        color: '#cbd5e1'
-      })
-      .setOrigin(0, 0.5);
-
-    this.add.rectangle(this.mainX, this.mainEndY + 10, 92, 6, 0xef4444, 1);
-    this.add
-      .text(this.mainX + 86, this.mainEndY + 10, 'Main Stop', {
-        fontFamily: 'Segoe UI',
-        fontSize: '12px',
-        color: '#fca5a5'
-      })
-      .setOrigin(0, 0.5);
 
     const hasChestSprites = this.textures.exists(CHEST_CLOSED_KEY) && this.textures.exists(CHEST_OPENED_KEY);
 
@@ -314,14 +485,6 @@ export default class GameScene extends Phaser.Scene {
       };
       drawConveyorLines(beltLines, beltLineConfig);
 
-      this.add
-        .text(laneCenterX, laneConfig.y - 20, `${laneConfig.label} lane`, {
-          fontFamily: 'Segoe UI',
-          fontSize: '12px',
-          color: '#94a3b8'
-        })
-        .setOrigin(0.5);
-
       let chestSprite = null;
       let chestBaseScale = 1;
       if (hasChestSprites) {
@@ -333,31 +496,8 @@ export default class GameScene extends Phaser.Scene {
         this.add.rectangle(laneConfig.chestX, laneConfig.y, 114, 56, 0x334155, 1).setStrokeStyle(3, laneColor, 1);
       }
 
-      this.add
-        .text(laneConfig.chestX, laneConfig.y + 49, laneConfig.chestLabel, {
-          fontFamily: 'Segoe UI',
-          fontSize: '12px',
-          color: '#e2e8f0'
-        })
-        .setOrigin(0.5);
-
-      this.add
-        .text(laneConfig.chestX, laneConfig.y + 64, laneConfig.desiredType.toUpperCase(), {
-          fontFamily: 'Consolas',
-          fontSize: '10px',
-          color: '#cbd5e1'
-        })
-        .setOrigin(0.5);
-
       const clawX = this.mainX + laneConfig.direction * CLAW_OFFSET_X;
       const clawMarker = this.add.circle(clawX, laneConfig.y, CLAW_RADIUS, 0x94a3b8, 1).setStrokeStyle(2, laneColor, 1);
-      this.add
-        .text(clawX, laneConfig.y + 24, 'CLAW', {
-          fontFamily: 'Consolas',
-          fontSize: '10px',
-          color: '#cbd5e1'
-        })
-        .setOrigin(0.5);
 
       this.lanesById[laneConfig.id] = {
         ...laneConfig,
@@ -397,31 +537,17 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  createHud() {
-    this.statsText = this.add.text(20, 98, '', {
-      fontFamily: 'Consolas',
-      fontSize: '15px',
-      color: '#67e8f9'
-    });
+  updateDifficulty(dt) {
+    if (dt <= 0) {
+      return;
+    }
 
-    this.jamText = this.add.text(20, 122, '', {
-      fontFamily: 'Consolas',
-      fontSize: '14px',
-      color: '#fbbf24'
-    });
+    this.elapsedSeconds += dt;
+    const factor = Phaser.Math.Clamp(1 + this.elapsedSeconds * this.difficultyRampPerSecond, 1, 6);
 
-    this.legendText = this.add.text(
-      20,
-      146,
-      'Food keys: Cm=Condiments, Cb=Carbs, Pr=Protein, Gr=Greens',
-      {
-        fontFamily: 'Consolas',
-        fontSize: '13px',
-        color: '#94a3b8'
-      }
-    );
-
-    this.updateHud();
+    this.mainSpeed = Math.min(this.baseMainSpeed * factor, this.maxMainSpeed);
+    this.sideSpeed = Math.min(this.baseSideSpeed * factor, this.maxSideSpeed);
+    this.spawnIntervalMs = Math.max(this.minSpawnIntervalMs, this.baseSpawnIntervalMs / factor);
   }
 
   spawnFoodIfSpace() {
@@ -453,6 +579,16 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const container = this.add.container(this.mainX, this.mainStartY, [itemVisual]).setDepth(10);
+    container.setAlpha(0);
+    container.setScale(0.25);
+    this.tweens.add({
+      targets: container,
+      alpha: 1,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 170,
+      ease: 'Back.Out'
+    });
     const grabSize = FOOD_RENDER_SIZE * 1.15;
     const grabHandle = this.add.zone(this.mainX, this.mainStartY, grabSize, grabSize).setDepth(11);
     grabHandle.setInteractive({ useHandCursor: true });
@@ -470,6 +606,7 @@ export default class GameScene extends Phaser.Scene {
       state: 'main',
       laneId: null,
       attemptedRows: [false, false],
+      motionLock: false,
       container,
       grabHandle,
       itemVisual,
@@ -686,18 +823,31 @@ export default class GameScene extends Phaser.Scene {
       fromSlot: this.captureItemSlot(item)
     };
 
-    this.setTimeStopped(true);
+    item.state = 'dragging';
+    item.motionLock = true;
+    this.setSlowMotion(true);
 
     gameObject.input.cursor = 'grabbing';
     item.container.setDepth(220);
     item.grabHandle.setDepth(221);
     this.tweens.killTweensOf(item.container);
+    item.container.setAngle(0);
     this.tweens.add({
       targets: item.container,
-      scaleX: 1.16,
-      scaleY: 1.16,
+      scaleX: 1.22,
+      scaleY: 1.22,
       duration: 110,
       ease: 'Cubic.Out'
+    });
+
+    const wiggleAmount = Phaser.Math.Between(7, 11);
+    this.tweens.add({
+      targets: item.container,
+      angle: { from: -wiggleAmount, to: wiggleAmount },
+      duration: 260,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
     });
   }
 
@@ -747,6 +897,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   animateReturnToSlot(item, slot) {
+    item.motionLock = true;
     this.applyItemSlot(item, slot);
     const destination = this.getWorldPositionForSlot(slot);
 
@@ -755,6 +906,7 @@ export default class GameScene extends Phaser.Scene {
       targets: item.container,
       x: destination.x,
       y: destination.y,
+      angle: 0,
       scaleX: 1,
       scaleY: 1,
       duration: 185,
@@ -765,9 +917,11 @@ export default class GameScene extends Phaser.Scene {
         item.grabHandle.setPosition(item.x, item.y);
       },
       onComplete: () => {
+        item.motionLock = false;
         item.x = destination.x;
         item.y = destination.y;
         item.container.setPosition(destination.x, destination.y);
+        item.container.setAngle(0);
         item.grabHandle.setPosition(destination.x, destination.y);
         item.container.setDepth(10);
         item.grabHandle.setDepth(11);
@@ -778,6 +932,9 @@ export default class GameScene extends Phaser.Scene {
 
   animateSwapWithTarget(draggedItem, targetItem, draggedOriginSlot) {
     const targetSlot = this.captureItemSlot(targetItem);
+
+    draggedItem.motionLock = true;
+    targetItem.motionLock = true;
 
     this.applyItemSlot(draggedItem, targetSlot);
     this.applyItemSlot(targetItem, draggedOriginSlot);
@@ -795,6 +952,8 @@ export default class GameScene extends Phaser.Scene {
         return;
       }
 
+      draggedItem.motionLock = false;
+      targetItem.motionLock = false;
       draggedItem.container.setDepth(10);
       draggedItem.grabHandle.setDepth(11);
       targetItem.container.setDepth(10);
@@ -807,6 +966,7 @@ export default class GameScene extends Phaser.Scene {
       targets: draggedItem.container,
       x: draggedDestination.x,
       y: draggedDestination.y,
+      angle: 0,
       scaleX: 1,
       scaleY: 1,
       duration: 190,
@@ -829,6 +989,7 @@ export default class GameScene extends Phaser.Scene {
       targets: targetItem.container,
       x: targetDestination.x,
       y: targetDestination.y,
+      angle: 0,
       scaleX: 1.08,
       scaleY: 1.08,
       duration: 95,
@@ -850,7 +1011,7 @@ export default class GameScene extends Phaser.Scene {
 
   finishDragResolution() {
     if (!this.dragContext) {
-      this.setTimeStopped(false);
+      this.setSlowMotion(false);
       return;
     }
 
@@ -858,32 +1019,21 @@ export default class GameScene extends Phaser.Scene {
     if (draggedItem?.grabHandle?.input) {
       draggedItem.grabHandle.input.cursor = 'grab';
       draggedItem.container.setScale(1);
+      draggedItem.container.setAngle(0);
       draggedItem.container.setDepth(10);
       draggedItem.grabHandle.setDepth(11);
     }
 
+    if (draggedItem) {
+      draggedItem.motionLock = false;
+    }
+
     this.dragContext = null;
-    this.setTimeStopped(false);
+    this.setSlowMotion(false);
   }
 
-  setTimeStopped(shouldStop) {
-    if (this.isTimeStopped === shouldStop) {
-      return;
-    }
-
-    this.isTimeStopped = shouldStop;
-
-    if (!this.timeStopOverlay) {
-      return;
-    }
-
-    this.tweens.killTweensOf(this.timeStopOverlay);
-    this.tweens.add({
-      targets: this.timeStopOverlay,
-      alpha: shouldStop ? 0.09 : 0,
-      duration: shouldStop ? 90 : 120,
-      ease: shouldStop ? 'Quad.Out' : 'Quad.In'
-    });
+  setSlowMotion(shouldSlow) {
+    this.simTimeScale = shouldSlow ? this.dragSlowMoScale : 1;
   }
 
   refreshItemStateVisual(item) {
@@ -920,7 +1070,11 @@ export default class GameScene extends Phaser.Scene {
       const maxAllowedPos = frontPos === null ? this.mainLength : Math.max(0, frontPos - this.itemSpacing);
 
       if (item.state === 'main') {
-        item.mainPos = Math.min(item.mainPos + this.mainSpeed * dt, maxAllowedPos);
+        if (item.motionLock) {
+          item.mainPos = Math.min(item.mainPos, maxAllowedPos);
+        } else {
+          item.mainPos = Math.min(item.mainPos + this.mainSpeed * dt, maxAllowedPos);
+        }
       } else {
         item.mainPos = Math.min(item.mainPos, maxAllowedPos);
       }
@@ -939,7 +1093,7 @@ export default class GameScene extends Phaser.Scene {
 
   runClawTransfers() {
     const movingMainItems = this.items
-      .filter((item) => item.state === 'main')
+      .filter((item) => item.state === 'main' && !item.motionLock)
       .sort((a, b) => b.mainPos - a.mainPos);
 
     for (const item of movingMainItems) {
@@ -994,10 +1148,45 @@ export default class GameScene extends Phaser.Scene {
   transferToLane(item, laneId) {
     const lane = this.lanesById[laneId];
 
+    const startX = this.mainX;
+    const startY = this.mainStartY + item.mainPos;
+    const destinationX = lane.intakeX;
+    const destinationY = lane.y;
+
     item.state = 'side';
     item.laneId = laneId;
     item.lanePos = 0;
     this.clearItemTint(item);
+
+    item.motionLock = true;
+    item.x = startX;
+    item.y = startY;
+    item.container.setPosition(startX, startY);
+    item.grabHandle.setPosition(startX, startY);
+
+    this.tweens.killTweensOf(item.container);
+    this.tweens.add({
+      targets: item.container,
+      x: destinationX,
+      y: destinationY,
+      angle: lane.direction * 10,
+      duration: 140,
+      ease: 'Sine.Out',
+      onUpdate: () => {
+        item.x = item.container.x;
+        item.y = item.container.y;
+        item.grabHandle.setPosition(item.x, item.y);
+      },
+      onComplete: () => {
+        item.motionLock = false;
+        item.container.setAngle(0);
+        item.container.setScale(1);
+        item.x = destinationX;
+        item.y = destinationY;
+        item.container.setPosition(destinationX, destinationY);
+        item.grabHandle.setPosition(destinationX, destinationY);
+      }
+    });
 
     lane.clawMarker.setScale(1.28);
     this.tweens.add({
@@ -1020,6 +1209,12 @@ export default class GameScene extends Phaser.Scene {
         const maxAllowedPos = frontPos === null ? lane.length : Math.max(0, frontPos - this.itemSpacing);
 
         if (item.state === 'side') {
+          if (item.motionLock) {
+            item.lanePos = Math.min(item.lanePos, maxAllowedPos);
+            frontPos = item.lanePos;
+            continue;
+          }
+
           item.lanePos = Math.min(item.lanePos + this.sideSpeed * dt, maxAllowedPos);
 
           if (item.lanePos >= lane.length) {
@@ -1027,11 +1222,29 @@ export default class GameScene extends Phaser.Scene {
 
             if (item.type === lane.desiredType) {
               this.acceptedCount += 1;
+              this.handleComboConsume();
               this.startChestIntake(item, lane);
             } else {
               item.state = 'jammed';
               this.rejectedCount += 1;
+              this.breakCombo();
               this.applyItemStateTint(item, 0x64748b);
+
+              this.tweens.killTweensOf(item.container);
+              item.container.setAngle(0);
+              this.tweens.add({
+                targets: item.container,
+                angle: { from: -12, to: 12 },
+                duration: 70,
+                yoyo: true,
+                repeat: 4,
+                ease: 'Sine.InOut',
+                onComplete: () => {
+                  if (item.container?.active) {
+                    item.container.setAngle(0);
+                  }
+                }
+              });
             }
           }
         } else {
@@ -1053,6 +1266,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.playChestReceiveAnimation(lane);
+    this.emitChestConsumeParticles(item, lane);
 
     this.tweens.add({
       targets: item.container,
@@ -1116,11 +1330,13 @@ export default class GameScene extends Phaser.Scene {
 
   syncItemPositions() {
     for (const item of this.items) {
+      if (item.state === 'dragging' || item.state === 'consuming' || item.motionLock) {
+        continue;
+      }
+
       if (item.state === 'main' || item.state === 'stopped-main') {
         item.x = this.mainX;
         item.y = this.mainStartY + item.mainPos;
-      } else if (item.state === 'consuming') {
-        continue;
       } else {
         const lane = this.lanesById[item.laneId];
         item.x = lane.intakeX + lane.direction * item.lanePos;
@@ -1171,20 +1387,5 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  updateHud() {
-    const mainMovingCount = this.items.filter((item) => item.state === 'main').length;
-    const mainStoppedCount = this.items.filter((item) => item.state === 'stopped-main').length;
-    const flowState = this.isTimeStopped ? 'PAUSED' : 'RUNNING';
-
-    this.statsText.setText(
-      `Accepted: ${this.acceptedCount}  |  Rejected: ${this.rejectedCount}  |  Main moving: ${mainMovingCount}  |  Main stopped: ${mainStoppedCount}  |  Active: ${this.items.length}  |  Flow: ${flowState}`
-    );
-
-    const jamSummary = LANE_LAYOUT.map((laneConfig) => {
-      const jammedInLane = this.items.filter((item) => item.state === 'jammed' && item.laneId === laneConfig.id).length;
-      return `${laneConfig.label}:${jammedInLane}`;
-    }).join('   ');
-
-    this.jamText.setText(`Current jams by chest -> ${jamSummary}`);
-  }
+  
 }
