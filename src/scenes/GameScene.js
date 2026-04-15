@@ -154,13 +154,13 @@ export default class GameScene extends Phaser.Scene {
     this.spawnTimerMs = 0;
     this.elapsedSeconds = 0;
 
-    this.baseMainSpeed = 80;
-    this.baseSideSpeed = 120;
-    this.maxMainSpeed = 260;
-    this.maxSideSpeed = 360;
-    this.baseSpawnIntervalMs = 780;
-    this.minSpawnIntervalMs = 280;
-    this.difficultyRampPerSecond = 0.05;
+    this.baseMainSpeed = 70;
+    this.baseSideSpeed = 105;
+    this.maxMainSpeed = 235;
+    this.maxSideSpeed = 325;
+    this.baseSpawnIntervalMs = 850;
+    this.minSpawnIntervalMs = 340;
+    this.difficultyRampPerSecond = 0.04;
 
     this.mainSpeed = this.baseMainSpeed;
     this.sideSpeed = this.baseSideSpeed;
@@ -543,7 +543,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.elapsedSeconds += dt;
-    const factor = Phaser.Math.Clamp(1 + this.elapsedSeconds * this.difficultyRampPerSecond, 1, 6);
+    const factor = Phaser.Math.Clamp(1 + this.elapsedSeconds * this.difficultyRampPerSecond, 1, 5);
 
     this.mainSpeed = Math.min(this.baseMainSpeed * factor, this.maxMainSpeed);
     this.sideSpeed = Math.min(this.baseSideSpeed * factor, this.maxSideSpeed);
