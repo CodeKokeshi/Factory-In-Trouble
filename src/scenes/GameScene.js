@@ -142,25 +142,6 @@ const CLAW_ROWS = [
   { y: 500, leftLaneId: 'bot_left', rightLaneId: 'bot_right' }
 ];
 
-const ROW_INDEX_BY_FOOD_TYPE = (() => {
-  const desiredTypeByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
-    acc[lane.id] = lane.desiredType;
-    return acc;
-  }, {});
-
-  return CLAW_ROWS.reduce((acc, row, rowIndex) => {
-    const leftType = desiredTypeByLaneId[row.leftLaneId];
-    const rightType = desiredTypeByLaneId[row.rightLaneId];
-    if (leftType) {
-      acc[leftType] = rowIndex;
-    }
-    if (rightType) {
-      acc[rightType] = rowIndex;
-    }
-    return acc;
-  }, {});
-})();
-
 export default class GameScene extends Phaser.Scene {
   constructor() {
     super('GameScene');
@@ -427,9 +408,7 @@ export default class GameScene extends Phaser.Scene {
       return false;
     }
 
-    const mainIsStuck = this.items.some(
-      (item) => item.state === 'stopped-main' || (item.state === 'main' && typeof item.holdMainPos === 'number')
-    );
+    const mainIsStuck = this.items.some((item) => item.state === 'stopped-main');
 
     return mainIsStuck;
   }
@@ -651,9 +630,6 @@ export default class GameScene extends Phaser.Scene {
       lanePos: 0,
       state: 'main',
       laneId: null,
-      targetRowIndex: ROW_INDEX_BY_FOOD_TYPE[food.id] ?? 0,
-      preferRight: Math.random() < 0.5,
-      holdMainPos: null,
       motionLock: false,
       container,
       grabHandle,
@@ -1114,17 +1090,15 @@ export default class GameScene extends Phaser.Scene {
     let frontPos = null;
     for (const item of mainItems) {
       const maxAllowedPos = frontPos === null ? this.mainLength : Math.max(0, frontPos - this.itemSpacing);
-      const holdPos = typeof item.holdMainPos === 'number' ? item.holdMainPos : Number.POSITIVE_INFINITY;
-      const maxAllowedWithHold = Math.min(maxAllowedPos, holdPos);
 
       if (item.state === 'main') {
         if (item.motionLock) {
-          item.mainPos = Math.min(item.mainPos, maxAllowedWithHold);
+          item.mainPos = Math.min(item.mainPos, maxAllowedPos);
         } else {
-          item.mainPos = Math.min(item.mainPos + this.mainSpeed * dt, maxAllowedWithHold);
+          item.mainPos = Math.min(item.mainPos + this.mainSpeed * dt, maxAllowedPos);
         }
       } else {
-        item.mainPos = Math.min(item.mainPos, maxAllowedWithHold);
+        item.mainPos = Math.min(item.mainPos, maxAllowedPos);
       }
 
       if (item.mainPos >= this.mainLength) {
@@ -1145,64 +1119,110 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
-    const reachEpsilon = 0.001;
+    const laneIds = LANE_LAYOUT.map((laneConfig) => laneConfig.id);
+    const laneFillCount = laneIds.reduce((acc, laneId) => {
+      acc[laneId] = 0;
+      return acc;
+    }, {});
 
-    for (let rowIndex = 0; rowIndex < CLAW_ROWS.length; rowIndex += 1) {
-      const row = CLAW_ROWS[rowIndex];
-      const rowPos = row.y - this.mainStartY;
-
-      let candidateItem = null;
-      let candidateMainPos = -Infinity;
-
-      for (const item of movingMainItems) {
-        if (typeof item.targetRowIndex !== 'number') {
-          item.targetRowIndex = ROW_INDEX_BY_FOOD_TYPE[item.type] ?? 0;
-        }
-        if (item.targetRowIndex !== rowIndex) {
-          continue;
-        }
-
-        if (typeof item.preferRight !== 'boolean') {
-          item.preferRight = Math.random() < 0.5;
-        }
-
-        const isHeldHere = typeof item.holdMainPos === 'number' && Math.abs(item.holdMainPos - rowPos) < 0.001;
-        const hasReachedRow = item.mainPos + reachEpsilon >= rowPos;
-        if (!isHeldHere && !hasReachedRow) {
-          continue;
-        }
-
-        if (item.mainPos > candidateMainPos) {
-          candidateItem = item;
-          candidateMainPos = item.mainPos;
-        }
+    for (const item of this.items) {
+      if (!item.laneId || laneFillCount[item.laneId] === undefined) {
+        continue;
       }
-
-      if (!candidateItem) {
+      if (item.state !== 'side' && item.state !== 'jammed') {
         continue;
       }
 
-      const laneOrder = candidateItem.preferRight
-        ? [row.rightLaneId, row.leftLaneId]
-        : [row.leftLaneId, row.rightLaneId];
+      laneFillCount[item.laneId] += 1;
+    }
 
-      let transferred = false;
-      for (const laneId of laneOrder) {
+    const pickBalancedLane = (candidateLaneIds) => {
+      let minFill = Number.POSITIVE_INFINITY;
+      const best = [];
+
+      for (const laneId of candidateLaneIds) {
         if (!this.canEnterLane(laneId)) {
           continue;
         }
 
-        // Clamp to the claw row so transfer animation always begins at the claw.
-        candidateItem.mainPos = Math.min(candidateItem.mainPos, rowPos);
-        candidateItem.holdMainPos = null;
-        this.transferToLane(candidateItem, laneId);
-        transferred = true;
-        break;
+        const fill = laneFillCount[laneId] ?? 0;
+        if (fill < minFill) {
+          minFill = fill;
+          best.length = 0;
+          best.push(laneId);
+          continue;
+        }
+
+        if (fill === minFill) {
+          best.push(laneId);
+        }
       }
 
-      if (!transferred) {
-        candidateItem.holdMainPos = rowPos;
-        candidateItem.mainPos = Math.min(candidateItem.mainPos, rowPos);
+      if (best.length === 0) {
+        return null;
+      }
+
+      return Phaser.Utils.Array.GetRandom(best);
+    };
+
+    const reachEpsilon = 0.001;
+    const rowWindow = this.itemSpacing * 2.5;
+
+    const findCandidateNearRow = (rowPos, nextRowPos = null) => {
+      const maxPos = rowPos + rowWindow;
+      let candidate = null;
+      let bestMainPos = Number.POSITIVE_INFINITY;
+
+      for (const item of movingMainItems) {
+        if (item.mainPos + reachEpsilon < rowPos) {
+          continue;
+        }
+        if (item.mainPos > maxPos) {
+          continue;
+        }
+        if (typeof nextRowPos === 'number' && item.mainPos >= nextRowPos) {
+          continue;
+        }
+        if (item.mainPos < bestMainPos) {
+          candidate = item;
+          bestMainPos = item.mainPos;
+        }
+      }
+
+      return candidate;
+    };
+
+    // Row 0: pick the emptiest *enterable* side belt across ALL 4 lanes.
+    // If the emptiest is a bottom lane, the item continues straight to row 1.
+    if (CLAW_ROWS.length >= 1) {
+      const row = CLAW_ROWS[0];
+      const rowPos = row.y - this.mainStartY;
+      const nextRowPos = CLAW_ROWS.length >= 2 ? CLAW_ROWS[1].y - this.mainStartY : this.mainLength;
+
+      const candidate = findCandidateNearRow(rowPos, nextRowPos);
+
+      if (candidate) {
+        const bestOverall = pickBalancedLane(laneIds);
+        if (bestOverall === row.leftLaneId || bestOverall === row.rightLaneId) {
+          candidate.mainPos = Math.min(candidate.mainPos, rowPos);
+          this.transferToLane(candidate, bestOverall);
+        }
+      }
+    }
+
+    // Row 1: pick the emptiest *enterable* bottom belt.
+    if (CLAW_ROWS.length >= 2) {
+      const row = CLAW_ROWS[1];
+      const rowPos = row.y - this.mainStartY;
+
+      const candidate = findCandidateNearRow(rowPos);
+
+      if (candidate) {
+        const bestBottom = pickBalancedLane([row.leftLaneId, row.rightLaneId]);
+        if (bestBottom) {
+          candidate.mainPos = Math.min(candidate.mainPos, rowPos);
+          this.transferToLane(candidate, bestBottom);
+        }
       }
     }
   }
