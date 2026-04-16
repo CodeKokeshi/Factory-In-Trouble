@@ -209,6 +209,10 @@ export default class GameScene extends Phaser.Scene {
     this.cardCatalog = [];
     this.cardStatusText = null;
     this.pressureText = null;
+    this.effectHudGraphics = null;
+    this.effectHudTitle = null;
+    this.effectHudRows = [];
+    this.lastPickedCardId = null;
     this.lastPickedCardName = 'None';
     this.cardPickCount = 0;
 
@@ -234,6 +238,9 @@ export default class GameScene extends Phaser.Scene {
     this.cardDraftChoices = [];
     this.cardDraftEntries = [];
     this.cardDraftSelectedIndex = 0;
+    this.cardDraftPointerLockMs = 0;
+    this.cardDraftPointerLockDurationMs = 180;
+    this.cardDraftPointerReleaseRequired = false;
     this.cardInputKeys = null;
 
     this.coolantFlushHoldDurationMs = 10000;
@@ -242,6 +249,56 @@ export default class GameScene extends Phaser.Scene {
     this.coolantFlushRampMs = 0;
     this.smartSortScoreLockDurationMs = 6000;
     this.smartSortScoreLockMs = 0;
+
+    this.inserterCalibrationDurationMs = 14000;
+    this.inserterCalibrationMs = 0;
+    this.chestPriorityDurationMs = 15000;
+    this.chestPriorityMs = 0;
+    this.chestPriorityChargesByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
+      acc[lane.id] = 0;
+      return acc;
+    }, {});
+
+    this.turboShiftDurationMs = 18000;
+    this.turboShiftMs = 0;
+    this.turboShiftScoreScale = 1.25;
+    this.turboShiftSpeedScale = 1.18;
+    this.comboFurnaceDurationMs = 14000;
+    this.comboFurnaceMs = 0;
+    this.comboFurnaceMultiplierGain = 2;
+    this.comboFurnaceJamPenaltyPoints = 200;
+    this.comboFurnaceJamPenaltyArmed = false;
+
+    this.emergencyBrakeDurationMs = 7000;
+    this.emergencyBrakeMs = 0;
+    this.emergencyBrakeTimeScale = 0.55;
+    this.emergencyBrakePenaltySpawns = 12;
+    this.emergencyBrakePenaltySpawnsRemaining = 0;
+    this.emergencyBrakePenaltyScoreScale = 0.8;
+
+    this.overflowPurgeMaxItems = 5;
+    this.overflowPurgeBasePenalty = 250;
+    this.overflowPurgePenaltyPerItem = 30;
+
+    this.beltRephaseDurationMs = 12000;
+    this.beltRephaseMs = 0;
+    this.beltRephaseMainSpeedScale = 1.08;
+    this.beltRephaseSideSpacingScale = 0.82;
+
+    this.predictivePullSpawnsPerUse = 20;
+    this.predictivePullSpawnsRemaining = 0;
+    this.predictivePullSpawnsCap = 0;
+    this.predictivePullBiasWeight = 0.85;
+    this.predictivePullSpawnTradeoffScale = 0.92;
+
+    this.riskyThroughputDurationMs = 16000;
+    this.riskyThroughputMs = 0;
+    this.riskyThroughputSpawnScale = 0.75;
+    this.riskyThroughputBonusPoints = 2;
+
+    this.fragileJackpotPoints = 1200;
+    this.fragileJackpotDurationMs = 10000;
+    this.fragileJackpotNoSlowMoMs = 0;
 
     this.foodTypeById = FOOD_TYPES.reduce((acc, food) => {
       acc[food.id] = food;
@@ -279,23 +336,16 @@ export default class GameScene extends Phaser.Scene {
   createCardSystem() {
     this.cardCatalog = this.buildCardCatalog();
 
-    this.cardStatusText = this.add
-      .text(18, 70, '', {
-        fontFamily: 'Consolas',
-        fontSize: '16px',
-        color: '#93c5fd'
-      })
-      .setDepth(300)
-      .setShadow(0, 2, '#000000', 8);
-
     this.pressureText = this.add
-      .text(18, 92, '', {
+      .text(18, 70, '', {
         fontFamily: 'Consolas',
         fontSize: '16px',
         color: '#fcd34d'
       })
       .setDepth(300)
       .setShadow(0, 2, '#000000', 8);
+
+    this.createEffectHud();
 
     if (this.input.keyboard) {
       this.cardInputKeys = this.input.keyboard.addKeys({
@@ -309,6 +359,20 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.refreshCardHud();
+    this.updateEffectHud();
+  }
+
+  createEffectHud() {
+    this.effectHudGraphics = this.add.graphics().setDepth(304);
+    this.effectHudTitle = this.add
+      .text(0, 0, 'ACTIVE EFFECTS', {
+        fontFamily: 'Consolas',
+        fontSize: '14px',
+        color: '#cbd5e1'
+      })
+      .setDepth(305)
+      .setOrigin(1, 0);
+    this.effectHudRows = [];
   }
 
   buildCardCatalog() {
@@ -317,67 +381,282 @@ export default class GameScene extends Phaser.Scene {
         id: 'coolant_flush',
         name: 'Coolant Flush',
         archetype: 'rescue',
+        rarity: 'common',
         description: 'Reset speeds to base, then ramp back up.',
-        note: 'Live in Phase 2: speed reset + smooth recovery.'
+        note: 'Speed reset and smooth recovery.'
       },
       {
         id: 'smart_sort_protocol',
         name: 'Smart Sort Protocol',
         archetype: 'rescue',
+        rarity: 'rare',
         description: 'Auto-sort active items and clear the main belt.',
-        note: 'Live in Phase 2: emergency reshuffle and breathing room.'
+        note: 'Emergency reshuffle and breathing room.'
+      },
+      {
+        id: 'emergency_brake',
+        name: 'Emergency Brake',
+        archetype: 'rescue',
+        rarity: 'common',
+        description: 'Apply factory-wide slow motion for 7 seconds.',
+        note: '45% slow, next 12 spawns score -20%.'
+      },
+      {
+        id: 'overflow_purge',
+        name: 'Overflow Purge',
+        archetype: 'rescue',
+        rarity: 'rare',
+        description: 'Delete up to 5 oldest jammed items immediately.',
+        note: 'Pay 250 + 30 per purged item.'
       },
       {
         id: 'inserter_calibration',
         name: 'Inserter Calibration',
         archetype: 'control',
+        rarity: 'common',
         description: 'Improve transfer lane selection temporarily.',
-        note: 'Effect is planned for Phase 3.'
+        note: 'Route matching improves for 14 seconds.'
       },
       {
         id: 'chest_priority_mode',
         name: 'Chest Priority Mode',
         archetype: 'control',
+        rarity: 'common',
         description: 'Temporarily grant limited chest forgiveness.',
-        note: 'Effect is planned for Phase 3.'
+        note: 'One wrong accept per chest for 15 seconds.'
+      },
+      {
+        id: 'belt_rephase',
+        name: 'Belt Rephase',
+        archetype: 'control',
+        rarity: 'common',
+        description: 'Increase side-belt spacing tolerance for 12 seconds.',
+        note: 'Safer side flow, main belt +8% speed.'
+      },
+      {
+        id: 'predictive_pull',
+        name: 'Predictive Pull',
+        archetype: 'control',
+        rarity: 'rare',
+        description: 'Improve routing bias for the next 20 spawned items.',
+        note: 'Spawn interval is 8% faster while active.'
       },
       {
         id: 'turbo_shift',
         name: 'Turbo Shift',
         archetype: 'greed',
+        rarity: 'rare',
         description: 'Higher score gain at higher speed pressure.',
-        note: 'Effect is planned for Phase 4.'
+        note: '+25% score, +18% belt speed for 18 seconds.'
       },
       {
         id: 'combo_furnace',
         name: 'Combo Furnace',
         archetype: 'greed',
+        rarity: 'rare',
         description: 'Boost combo growth with bigger downside risk.',
-        note: 'Effect is planned for Phase 4.'
+        note: '+2 multiplier gain, one jam costs 200.'
+      },
+      {
+        id: 'risky_throughput',
+        name: 'Risky Throughput',
+        archetype: 'greed',
+        rarity: 'common',
+        description: 'Push spawn rate up for 16 seconds.',
+        note: '+25% spawn rate, +2 bonus per correct consume.'
+      },
+      {
+        id: 'fragile_jackpot',
+        name: 'Fragile Jackpot',
+        archetype: 'greed',
+        rarity: 'epic',
+        description: 'Gain instant points at the cost of drag stability.',
+        note: '+1200 score, no drag slow-mo for 10 seconds.'
       }
     ];
   }
 
   refreshCardHud() {
-    if (this.cardStatusText) {
-      const cardLabel = this.cardPickCount > 0 ? this.lastPickedCardName : 'Ready';
-      const effectLabels = [];
-      if (this.coolantFlushHoldMs > 0) {
-        effectLabels.push(`Coolant ${Math.ceil(this.coolantFlushHoldMs / 1000)}s`);
-      } else if (this.coolantFlushRampMs > 0) {
-        effectLabels.push(`Coolant Ramp ${Math.ceil(this.coolantFlushRampMs / 1000)}s`);
-      }
-      if (this.smartSortScoreLockMs > 0) {
-        effectLabels.push(`No Score ${Math.ceil(this.smartSortScoreLockMs / 1000)}s`);
-      }
-
-      const suffix = effectLabels.length > 0 ? ` | ${effectLabels.join(' | ')}` : '';
-      this.cardStatusText.setText(`CARD ${cardLabel}${suffix}`);
-    }
-
     if (this.pressureText) {
       this.pressureText.setText(`PRESSURE ${Math.round(this.currentPressure * 100)}%`);
     }
+  }
+
+  formatEffectTime(ms) {
+    const seconds = Math.max(0, Math.ceil(ms / 100) / 10);
+    return `${seconds.toFixed(1)}s`;
+  }
+
+  getActiveEffectHudEntries() {
+    const entries = [];
+
+    const pushTimed = (remainingMs, totalMs, label, color, suffix = '') => {
+      if (remainingMs <= 0) {
+        return;
+      }
+
+      const progress = Phaser.Math.Clamp(remainingMs / Math.max(1, totalMs), 0, 1);
+      const suffixText = suffix ? ` ${suffix}` : '';
+      entries.push({
+        label,
+        value: `${this.formatEffectTime(remainingMs)}${suffixText}`,
+        progress,
+        color
+      });
+    };
+
+    if (this.coolantFlushHoldMs > 0) {
+      pushTimed(this.coolantFlushHoldMs, this.coolantFlushHoldDurationMs, 'Coolant Hold', 0x22d3ee);
+    } else if (this.coolantFlushRampMs > 0) {
+      pushTimed(this.coolantFlushRampMs, this.coolantFlushRampDurationMs, 'Coolant Ramp', 0x38bdf8);
+    }
+
+    pushTimed(this.smartSortScoreLockMs, this.smartSortScoreLockDurationMs, 'No Score', 0x06b6d4);
+    pushTimed(this.inserterCalibrationMs, this.inserterCalibrationDurationMs, 'Inserter Calib', 0xf59e0b);
+
+    if (this.chestPriorityMs > 0) {
+      const charges = this.getTotalChestPriorityCharges();
+      pushTimed(
+        this.chestPriorityMs,
+        this.chestPriorityDurationMs,
+        'Chest Tolerance',
+        0xfb923c,
+        `| ${charges}/${LANE_LAYOUT.length}`
+      );
+    }
+
+    pushTimed(this.turboShiftMs, this.turboShiftDurationMs, 'Turbo Shift', 0xef4444);
+    if (this.comboFurnaceMs > 0) {
+      const penaltyState = this.comboFurnaceJamPenaltyArmed ? 'armed' : 'spent';
+      pushTimed(
+        this.comboFurnaceMs,
+        this.comboFurnaceDurationMs,
+        'Combo Furnace',
+        0xf43f5e,
+        `| ${penaltyState}`
+      );
+    }
+
+    pushTimed(this.emergencyBrakeMs, this.emergencyBrakeDurationMs, 'Emergency Brake', 0x22d3ee);
+    if (this.emergencyBrakePenaltySpawnsRemaining > 0) {
+      const maxPenaltySpawns = Math.max(1, this.emergencyBrakePenaltySpawns);
+      entries.push({
+        label: 'Brake Penalty',
+        value: `${this.emergencyBrakePenaltySpawnsRemaining}/${maxPenaltySpawns} spawns`,
+        progress: Phaser.Math.Clamp(this.emergencyBrakePenaltySpawnsRemaining / maxPenaltySpawns, 0, 1),
+        color: 0x38bdf8
+      });
+    }
+
+    pushTimed(this.beltRephaseMs, this.beltRephaseDurationMs, 'Belt Rephase', 0xf59e0b);
+
+    if (this.predictivePullSpawnsRemaining > 0) {
+      const maxPredictiveSpawns = Math.max(1, this.predictivePullSpawnsCap || this.predictivePullSpawnsPerUse);
+      entries.push({
+        label: 'Predictive Pull',
+        value: `${this.predictivePullSpawnsRemaining}/${maxPredictiveSpawns} spawns`,
+        progress: Phaser.Math.Clamp(this.predictivePullSpawnsRemaining / maxPredictiveSpawns, 0, 1),
+        color: 0xf59e0b
+      });
+    }
+
+    pushTimed(this.riskyThroughputMs, this.riskyThroughputDurationMs, 'Risky Throughput', 0xef4444);
+    pushTimed(this.fragileJackpotNoSlowMoMs, this.fragileJackpotDurationMs, 'No Slow-Mo', 0xdc2626);
+
+    return entries;
+  }
+
+  ensureEffectHudRows(count) {
+    while (this.effectHudRows.length < count) {
+      const labelText = this.add
+        .text(0, 0, '', {
+          fontFamily: 'Consolas',
+          fontSize: '13px',
+          color: '#e2e8f0'
+        })
+        .setDepth(305);
+
+      const valueText = this.add
+        .text(0, 0, '', {
+          fontFamily: 'Consolas',
+          fontSize: '12px',
+          color: '#94a3b8'
+        })
+        .setDepth(305)
+        .setOrigin(1, 0);
+
+      this.effectHudRows.push({ labelText, valueText });
+    }
+
+    for (let index = count; index < this.effectHudRows.length; index += 1) {
+      this.effectHudRows[index].labelText.setVisible(false);
+      this.effectHudRows[index].valueText.setVisible(false);
+    }
+  }
+
+  updateEffectHud() {
+    if (!this.effectHudGraphics || !this.effectHudTitle) {
+      return;
+    }
+
+    const entries = this.getActiveEffectHudEntries();
+    this.effectHudGraphics.clear();
+
+    if (entries.length === 0) {
+      this.effectHudTitle.setVisible(false);
+      this.ensureEffectHudRows(0);
+      return;
+    }
+
+    const panelRight = 1262;
+    const panelTop = 12;
+    const panelWidth = 350;
+    const panelLeft = panelRight - panelWidth;
+    const padding = 10;
+    const titleHeight = 18;
+    const rowHeight = 32;
+    const barHeight = 6;
+    const panelHeight = padding + titleHeight + 8 + entries.length * rowHeight + 8;
+
+    this.effectHudGraphics.fillStyle(0x0b1220, 0.88);
+    this.effectHudGraphics.fillRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 8);
+    this.effectHudGraphics.lineStyle(1, 0x334155, 0.95);
+    this.effectHudGraphics.strokeRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 8);
+
+    this.effectHudTitle.setVisible(true);
+    this.effectHudTitle.setPosition(panelRight - padding, panelTop + padding);
+
+    this.ensureEffectHudRows(entries.length);
+
+    const barX = panelLeft + padding;
+    const barWidth = panelWidth - padding * 2;
+
+    entries.forEach((entry, index) => {
+      const rowTop = panelTop + padding + titleHeight + 6 + index * rowHeight;
+      const barY = rowTop + 20;
+
+      const row = this.effectHudRows[index];
+      row.labelText.setVisible(true);
+      row.valueText.setVisible(true);
+      row.labelText.setPosition(barX, rowTop);
+      row.valueText.setPosition(panelRight - padding, rowTop);
+      row.labelText.setText(entry.label);
+      row.valueText.setText(entry.value);
+
+      this.effectHudGraphics.fillStyle(0x1f2937, 0.96);
+      this.effectHudGraphics.fillRect(barX, barY, barWidth, barHeight);
+
+      const clampedProgress = Phaser.Math.Clamp(entry.progress ?? 0, 0, 1);
+      let fillWidth = Math.floor(barWidth * clampedProgress);
+      if (clampedProgress > 0 && fillWidth < 2) {
+        fillWidth = 2;
+      }
+
+      if (fillWidth > 0) {
+        this.effectHudGraphics.fillStyle(entry.color ?? 0x38bdf8, 1);
+        this.effectHudGraphics.fillRect(barX, barY, fillWidth, barHeight);
+      }
+    });
   }
 
   updateCardEffects(deltaMs) {
@@ -394,6 +673,45 @@ export default class GameScene extends Phaser.Scene {
     if (this.smartSortScoreLockMs > 0) {
       this.smartSortScoreLockMs = Math.max(0, this.smartSortScoreLockMs - deltaMs);
     }
+
+    if (this.inserterCalibrationMs > 0) {
+      this.inserterCalibrationMs = Math.max(0, this.inserterCalibrationMs - deltaMs);
+    }
+
+    if (this.chestPriorityMs > 0) {
+      const previous = this.chestPriorityMs;
+      this.chestPriorityMs = Math.max(0, this.chestPriorityMs - deltaMs);
+      if (previous > 0 && this.chestPriorityMs <= 0) {
+        this.resetChestPriorityCharges();
+      }
+    }
+
+    if (this.turboShiftMs > 0) {
+      this.turboShiftMs = Math.max(0, this.turboShiftMs - deltaMs);
+    }
+
+    if (this.comboFurnaceMs > 0) {
+      this.comboFurnaceMs = Math.max(0, this.comboFurnaceMs - deltaMs);
+      if (this.comboFurnaceMs <= 0) {
+        this.comboFurnaceJamPenaltyArmed = false;
+      }
+    }
+
+    if (this.emergencyBrakeMs > 0) {
+      this.emergencyBrakeMs = Math.max(0, this.emergencyBrakeMs - deltaMs);
+    }
+
+    if (this.beltRephaseMs > 0) {
+      this.beltRephaseMs = Math.max(0, this.beltRephaseMs - deltaMs);
+    }
+
+    if (this.riskyThroughputMs > 0) {
+      this.riskyThroughputMs = Math.max(0, this.riskyThroughputMs - deltaMs);
+    }
+
+    if (this.fragileJackpotNoSlowMoMs > 0) {
+      this.fragileJackpotNoSlowMoMs = Math.max(0, this.fragileJackpotNoSlowMoMs - deltaMs);
+    }
   }
 
   applyCardEffect(card) {
@@ -408,6 +726,56 @@ export default class GameScene extends Phaser.Scene {
 
     if (card.id === 'smart_sort_protocol') {
       this.activateSmartSortProtocol();
+      return;
+    }
+
+    if (card.id === 'inserter_calibration') {
+      this.activateInserterCalibration();
+      return;
+    }
+
+    if (card.id === 'chest_priority_mode') {
+      this.activateChestPriorityMode();
+      return;
+    }
+
+    if (card.id === 'turbo_shift') {
+      this.activateTurboShift();
+      return;
+    }
+
+    if (card.id === 'combo_furnace') {
+      this.activateComboFurnace();
+      return;
+    }
+
+    if (card.id === 'emergency_brake') {
+      this.activateEmergencyBrake();
+      return;
+    }
+
+    if (card.id === 'overflow_purge') {
+      this.activateOverflowPurge();
+      return;
+    }
+
+    if (card.id === 'belt_rephase') {
+      this.activateBeltRephase();
+      return;
+    }
+
+    if (card.id === 'predictive_pull') {
+      this.activatePredictivePull();
+      return;
+    }
+
+    if (card.id === 'risky_throughput') {
+      this.activateRiskyThroughput();
+      return;
+    }
+
+    if (card.id === 'fragile_jackpot') {
+      this.activateFragileJackpot();
     }
   }
 
@@ -515,6 +883,106 @@ export default class GameScene extends Phaser.Scene {
     this.syncItemPositions();
   }
 
+  activateInserterCalibration() {
+    this.inserterCalibrationMs = this.inserterCalibrationDurationMs;
+  }
+
+  activateChestPriorityMode() {
+    this.chestPriorityMs = this.chestPriorityDurationMs;
+    this.chestPriorityChargesByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
+      acc[lane.id] = 1;
+      return acc;
+    }, {});
+  }
+
+  activateTurboShift() {
+    this.turboShiftMs = this.turboShiftDurationMs;
+  }
+
+  activateComboFurnace() {
+    this.comboFurnaceMs = this.comboFurnaceDurationMs;
+    this.comboFurnaceJamPenaltyArmed = true;
+  }
+
+  activateEmergencyBrake() {
+    this.emergencyBrakeMs = this.emergencyBrakeDurationMs;
+    this.emergencyBrakePenaltySpawnsRemaining = this.emergencyBrakePenaltySpawns;
+  }
+
+  activateOverflowPurge() {
+    const jammed = this.items
+      .filter((item) => item.state === 'jammed')
+      .sort((a, b) => a.id - b.id)
+      .slice(0, this.overflowPurgeMaxItems);
+
+    const removedCount = jammed.length;
+    for (const item of jammed) {
+      this.removeItemById(item.id);
+    }
+
+    const penalty = this.overflowPurgeBasePenalty + removedCount * this.overflowPurgePenaltyPerItem;
+    this.score = Math.max(0, this.score - penalty);
+    this.breakCombo();
+    this.refreshScoreUi();
+    this.bumpUiText(this.scoreText, 1.1, 95);
+  }
+
+  activateBeltRephase() {
+    this.beltRephaseMs = this.beltRephaseDurationMs;
+  }
+
+  activatePredictivePull() {
+    this.predictivePullSpawnsRemaining += this.predictivePullSpawnsPerUse;
+    this.predictivePullSpawnsCap = Math.max(this.predictivePullSpawnsCap, this.predictivePullSpawnsRemaining);
+  }
+
+  activateRiskyThroughput() {
+    this.riskyThroughputMs = this.riskyThroughputDurationMs;
+  }
+
+  activateFragileJackpot() {
+    this.score += this.fragileJackpotPoints;
+    this.refreshScoreUi();
+    this.bumpUiText(this.scoreText, 1.14, 95);
+    this.fragileJackpotNoSlowMoMs = this.fragileJackpotDurationMs;
+  }
+
+  getActiveSideSpacing() {
+    if (this.beltRephaseMs > 0) {
+      return this.itemSpacing * this.beltRephaseSideSpacingScale;
+    }
+
+    return this.itemSpacing;
+  }
+
+  resetChestPriorityCharges() {
+    this.chestPriorityChargesByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
+      acc[lane.id] = 0;
+      return acc;
+    }, {});
+  }
+
+  hasChestPriorityCharge(laneId) {
+    if (this.chestPriorityMs <= 0) {
+      return false;
+    }
+
+    return (this.chestPriorityChargesByLaneId[laneId] ?? 0) > 0;
+  }
+
+  consumeChestPriorityCharge(laneId) {
+    if (!this.hasChestPriorityCharge(laneId)) {
+      return false;
+    }
+
+    this.chestPriorityChargesByLaneId[laneId] = Math.max(0, (this.chestPriorityChargesByLaneId[laneId] ?? 0) - 1);
+    return true;
+  }
+
+  getTotalChestPriorityCharges() {
+    return LANE_LAYOUT.reduce((sum, lane) => sum + (this.chestPriorityChargesByLaneId[lane.id] ?? 0), 0);
+  }
+
   calculatePressureSnapshot() {
     const laneCount = Math.max(1, LANE_LAYOUT.length);
 
@@ -583,7 +1051,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.refreshCardHud();
 
-    if (this.isDraftActive || this.dragContext || this.cardDraftCooldownMs > 0) {
+    if (this.isDraftActive || this.dragContext || this.cardDraftCooldownMs > 0 || this.isPrimaryPointerDown()) {
       return;
     }
 
@@ -624,6 +1092,8 @@ export default class GameScene extends Phaser.Scene {
     this.cardDraftChoices = choices;
     this.cardDraftEntries = [];
     this.cardDraftSelectedIndex = 0;
+    this.cardDraftPointerLockMs = this.cardDraftPointerLockDurationMs;
+    this.cardDraftPointerReleaseRequired = this.isPrimaryPointerDown();
     this.cardDraftCooldownMs = this.cardDraftCooldownDurationMs;
     this.timeSinceLastDraftMs = 0;
     this.highPressureHoldMs = 0;
@@ -684,16 +1154,67 @@ export default class GameScene extends Phaser.Scene {
       return [];
     }
 
+    const stage = this.score < 12000 ? 'early' : this.score < 24000 ? 'mid' : 'late';
+    const rarityWeightById = {
+      common: 1,
+      rare: 0.62,
+      epic: 0.28
+    };
+
+    const archetypeStageWeightById = {
+      early: { rescue: 1.05, control: 1.25, greed: 0.9 },
+      mid: { rescue: 1, control: 1, greed: 1 },
+      late: { rescue: 1.25, control: 0.92, greed: 1.2 }
+    };
+
     const selected = [];
     const selectedIds = new Set();
 
-    const pickFrom = (archetypes) => {
+    const pickFrom = (archetypes, options = {}) => {
+      const { requireRescue = false } = options;
       const pool = available.filter((card) => archetypes.includes(card.archetype) && !selectedIds.has(card.id));
       if (pool.length === 0) {
         return null;
       }
 
-      return Phaser.Utils.Array.GetRandom(pool);
+      const weightedPool = [];
+      for (const card of pool) {
+        if (requireRescue && card.archetype !== 'rescue') {
+          continue;
+        }
+
+        const rarityWeight = rarityWeightById[card.rarity] ?? 1;
+        const stageWeight = archetypeStageWeightById[stage]?.[card.archetype] ?? 1;
+
+        let weight = rarityWeight * stageWeight;
+        if (triggerType === 'emergency' && card.archetype === 'rescue') {
+          weight *= 1.65;
+        }
+        if (triggerType === 'score' && card.archetype === 'greed') {
+          weight *= 1.2;
+        }
+        if (card.id === this.lastPickedCardId) {
+          weight *= 0.18;
+        }
+
+        weightedPool.push({ card, weight: Math.max(0.01, weight) });
+      }
+
+      if (weightedPool.length === 0) {
+        return null;
+      }
+
+      const totalWeight = weightedPool.reduce((sum, entry) => sum + entry.weight, 0);
+      let random = Math.random() * totalWeight;
+
+      for (const entry of weightedPool) {
+        random -= entry.weight;
+        if (random <= 0) {
+          return entry.card;
+        }
+      }
+
+      return weightedPool[weightedPool.length - 1].card;
     };
 
     const addCard = (card) => {
@@ -709,7 +1230,7 @@ export default class GameScene extends Phaser.Scene {
 
     const highPressureDraft = triggerType === 'emergency' || this.currentPressure >= 0.75;
     if (highPressureDraft && !selected.some((card) => card.archetype === 'rescue')) {
-      addCard(pickFrom(['rescue']));
+      addCard(pickFrom(['rescue'], { requireRescue: true }));
     }
 
     while (selected.length < 3) {
@@ -764,25 +1285,18 @@ export default class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    const note = this.add
-      .text(x, y + 102, card.note, {
-        fontFamily: 'Consolas',
-        fontSize: '14px',
-        color: '#94a3b8',
-        align: 'center',
-        wordWrap: { width: width - 34 }
-      })
-      .setOrigin(0.5);
-
     cardBg.on('pointerover', () => {
       this.setDraftSelection(index);
     });
 
     cardBg.on('pointerdown', () => {
+      if (!this.isDraftPointerPickReady()) {
+        return;
+      }
       this.pickDraftCard(index);
     });
 
-    container.add([cardBg, archetype, name, description, note]);
+    container.add([cardBg, archetype, name, description]);
     this.cardDraftEntries.push({ cardBg, archetypeColor });
   }
 
@@ -808,9 +1322,36 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
-  updateDraftInput() {
+  isPrimaryPointerDown() {
+    return this.input?.activePointer?.isDown === true;
+  }
+
+  isDraftPointerPickReady() {
+    if (!this.isDraftActive || this.cardDraftPointerLockMs > 0) {
+      return false;
+    }
+
+    if (this.cardDraftPointerReleaseRequired) {
+      if (this.isPrimaryPointerDown()) {
+        return false;
+      }
+      this.cardDraftPointerReleaseRequired = false;
+    }
+
+    return true;
+  }
+
+  updateDraftInput(deltaMs = 0) {
     if (!this.isDraftActive || !this.cardInputKeys) {
       return;
+    }
+
+    if (this.cardDraftPointerLockMs > 0) {
+      this.cardDraftPointerLockMs = Math.max(0, this.cardDraftPointerLockMs - deltaMs);
+    }
+
+    if (this.cardDraftPointerReleaseRequired && !this.isPrimaryPointerDown()) {
+      this.cardDraftPointerReleaseRequired = false;
     }
 
     const leftPressed =
@@ -849,6 +1390,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.applyCardEffect(chosenCard);
 
+    this.lastPickedCardId = chosenCard.id;
     this.lastPickedCardName = chosenCard.name;
     this.cardPickCount += 1;
 
@@ -886,6 +1428,8 @@ export default class GameScene extends Phaser.Scene {
     this.cardDraftChoices = [];
     this.cardDraftEntries = [];
     this.cardDraftSelectedIndex = 0;
+    this.cardDraftPointerLockMs = 0;
+    this.cardDraftPointerReleaseRequired = false;
     this.activeDraftTrigger = null;
     this.isDraftActive = false;
   }
@@ -1017,21 +1561,37 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
-  handleComboConsume() {
+  handleComboConsume(consumedItem = null) {
     if (this.smartSortScoreLockMs > 0) {
       this.bumpUiText(this.scoreText, 1.04, 70);
       return;
     }
 
     const basePoints = 100;
-    this.score += basePoints * this.multiplier;
-    this.multiplier = Math.min(this.multiplier + 1, this.maxMultiplier);
+    const scoreScale = this.turboShiftMs > 0 ? this.turboShiftScoreScale : 1;
+    const incomingScale = Math.max(0.4, consumedItem?.scoreScale ?? 1);
+    this.score += Math.round(basePoints * this.multiplier * scoreScale * incomingScale);
+
+    if (this.riskyThroughputMs > 0) {
+      this.score += this.riskyThroughputBonusPoints;
+    }
+
+    const multiplierGain = this.comboFurnaceMs > 0 ? this.comboFurnaceMultiplierGain : 1;
+    this.multiplier = Math.min(this.multiplier + multiplierGain, this.maxMultiplier);
+
     this.refreshScoreUi();
     this.bumpUiText(this.scoreText, 1.06, 85);
     this.bumpUiText(this.multiplierText, 1.22, 105);
   }
 
-  breakCombo() {
+  breakCombo(reason = 'generic') {
+    if (reason === 'jam' && this.comboFurnaceMs > 0 && this.comboFurnaceJamPenaltyArmed) {
+      this.comboFurnaceJamPenaltyArmed = false;
+      this.score = Math.max(0, this.score - this.comboFurnaceJamPenaltyPoints);
+      this.refreshScoreUi();
+      this.bumpUiText(this.scoreText, 1.12, 95);
+    }
+
     if (this.multiplier <= 1) {
       return;
     }
@@ -1052,18 +1612,22 @@ export default class GameScene extends Phaser.Scene {
 
   update(_time, delta) {
     if (this.isGameOver) {
+      this.updateEffectHud();
       return;
     }
 
     if (this.isDraftActive) {
-      this.updateDraftInput();
+      this.updateDraftInput(delta);
+      this.updateEffectHud();
       return;
     }
 
-    const scaledDeltaMs = delta * this.simTimeScale;
+    const manualScaledDeltaMs = delta * this.simTimeScale;
+    const effectiveSimTimeScale = this.getEffectiveSimulationTimeScale();
+    const scaledDeltaMs = delta * effectiveSimTimeScale;
     const dt = scaledDeltaMs / 1000;
 
-    this.updateCardEffects(scaledDeltaMs);
+    this.updateCardEffects(manualScaledDeltaMs);
     this.updateDifficulty();
 
     this.spawnBlockedThisFrame = false;
@@ -1091,6 +1655,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.checkForGameOver(dt);
     this.updateCardDraftSystem(delta);
+    this.updateEffectHud();
   }
 
   checkForGameOver(dt) {
@@ -1305,6 +1870,13 @@ export default class GameScene extends Phaser.Scene {
       this.mainSpeed = this.baseMainSpeed;
       this.sideSpeed = this.baseSideSpeed;
       this.spawnIntervalMs = this.baseSpawnIntervalMs;
+
+      if (this.riskyThroughputMs > 0) {
+        this.spawnIntervalMs = Math.max(120, this.spawnIntervalMs * this.riskyThroughputSpawnScale);
+      }
+      if (this.predictivePullSpawnsRemaining > 0) {
+        this.spawnIntervalMs = Math.max(120, this.spawnIntervalMs * this.predictivePullSpawnTradeoffScale);
+      }
       return;
     }
 
@@ -1317,12 +1889,40 @@ export default class GameScene extends Phaser.Scene {
       this.mainSpeed = Phaser.Math.Linear(this.baseMainSpeed, clampedMainTarget, rampProgress);
       this.sideSpeed = Phaser.Math.Linear(this.baseSideSpeed, clampedSideTarget, rampProgress);
       this.spawnIntervalMs = Phaser.Math.Linear(this.baseSpawnIntervalMs, clampedSpawnTarget, rampProgress);
+
+      if (this.turboShiftMs > 0) {
+        this.mainSpeed = Math.min(this.mainSpeed * this.turboShiftSpeedScale, this.maxMainSpeed * 1.35);
+        this.sideSpeed = Math.min(this.sideSpeed * this.turboShiftSpeedScale, this.maxSideSpeed * 1.35);
+      }
+      if (this.beltRephaseMs > 0) {
+        this.mainSpeed = Math.min(this.mainSpeed * this.beltRephaseMainSpeedScale, this.maxMainSpeed * 1.45);
+      }
+      if (this.riskyThroughputMs > 0) {
+        this.spawnIntervalMs = Math.max(120, this.spawnIntervalMs * this.riskyThroughputSpawnScale);
+      }
+      if (this.predictivePullSpawnsRemaining > 0) {
+        this.spawnIntervalMs = Math.max(120, this.spawnIntervalMs * this.predictivePullSpawnTradeoffScale);
+      }
       return;
     }
 
     this.mainSpeed = clampedMainTarget;
     this.sideSpeed = clampedSideTarget;
     this.spawnIntervalMs = clampedSpawnTarget;
+
+    if (this.turboShiftMs > 0) {
+      this.mainSpeed = Math.min(this.mainSpeed * this.turboShiftSpeedScale, this.maxMainSpeed * 1.35);
+      this.sideSpeed = Math.min(this.sideSpeed * this.turboShiftSpeedScale, this.maxSideSpeed * 1.35);
+    }
+    if (this.beltRephaseMs > 0) {
+      this.mainSpeed = Math.min(this.mainSpeed * this.beltRephaseMainSpeedScale, this.maxMainSpeed * 1.45);
+    }
+    if (this.riskyThroughputMs > 0) {
+      this.spawnIntervalMs = Math.max(120, this.spawnIntervalMs * this.riskyThroughputSpawnScale);
+    }
+    if (this.predictivePullSpawnsRemaining > 0) {
+      this.spawnIntervalMs = Math.max(120, this.spawnIntervalMs * this.predictivePullSpawnTradeoffScale);
+    }
   }
 
   spawnFoodIfSpace() {
@@ -1372,6 +1972,21 @@ export default class GameScene extends Phaser.Scene {
     grabHandle.setData('itemId', itemId);
     grabHandle.input.cursor = 'grab';
 
+    let itemScoreScale = 1;
+    if (this.emergencyBrakePenaltySpawnsRemaining > 0) {
+      this.emergencyBrakePenaltySpawnsRemaining = Math.max(0, this.emergencyBrakePenaltySpawnsRemaining - 1);
+      itemScoreScale = this.emergencyBrakePenaltyScoreScale;
+    }
+
+    let predictivePullBoosted = false;
+    if (this.predictivePullSpawnsRemaining > 0) {
+      this.predictivePullSpawnsRemaining = Math.max(0, this.predictivePullSpawnsRemaining - 1);
+      predictivePullBoosted = true;
+      if (this.predictivePullSpawnsRemaining <= 0) {
+        this.predictivePullSpawnsCap = 0;
+      }
+    }
+
     this.items.push({
       id: itemId,
       type: food.id,
@@ -1382,6 +1997,8 @@ export default class GameScene extends Phaser.Scene {
       state: 'main',
       laneId: null,
       motionLock: false,
+      scoreScale: itemScoreScale,
+      predictivePullBoosted,
       container,
       grabHandle,
       itemVisual,
@@ -1555,6 +2172,8 @@ export default class GameScene extends Phaser.Scene {
   }
 
   isLanePosFree(laneId, lanePos, excludedItemId) {
+    const spacing = this.getActiveSideSpacing();
+
     for (const item of this.items) {
       if (item.id === excludedItemId) {
         continue;
@@ -1572,7 +2191,7 @@ export default class GameScene extends Phaser.Scene {
         continue;
       }
 
-      if (Math.abs(item.lanePos - lanePos) < this.itemSpacing) {
+      if (Math.abs(item.lanePos - lanePos) < spacing) {
         return false;
       }
     }
@@ -1810,7 +2429,17 @@ export default class GameScene extends Phaser.Scene {
   }
 
   setSlowMotion(shouldSlow) {
+    if (shouldSlow && this.fragileJackpotNoSlowMoMs > 0) {
+      this.simTimeScale = 1;
+      return;
+    }
+
     this.simTimeScale = shouldSlow ? this.dragSlowMoScale : 1;
+  }
+
+  getEffectiveSimulationTimeScale() {
+    const brakeScale = this.emergencyBrakeMs > 0 ? this.emergencyBrakeTimeScale : 1;
+    return this.simTimeScale * brakeScale;
   }
 
   refreshItemStateVisual(item) {
@@ -1891,33 +2520,49 @@ export default class GameScene extends Phaser.Scene {
       laneFillCount[item.laneId] += 1;
     }
 
-    const pickBalancedLane = (candidateLaneIds) => {
-      let minFill = Number.POSITIVE_INFINITY;
-      const best = [];
+    const pickBalancedLane = (candidateLaneIds, preferredType = null, preferredBiasWeight = 0) => {
+      const chooseByFill = (laneIds) => {
+        let minScore = Number.POSITIVE_INFINITY;
+        const best = [];
 
-      for (const laneId of candidateLaneIds) {
-        if (!this.canEnterLane(laneId)) {
-          continue;
+        for (const laneId of laneIds) {
+          if (!this.canEnterLane(laneId)) {
+            continue;
+          }
+
+          const fill = laneFillCount[laneId] ?? 0;
+          const preferredPenalty = preferredType && this.lanesById[laneId]?.desiredType === preferredType ? preferredBiasWeight : 0;
+          const weightedScore = fill - preferredPenalty;
+
+          if (weightedScore < minScore) {
+            minScore = weightedScore;
+            best.length = 0;
+            best.push(laneId);
+            continue;
+          }
+
+          if (weightedScore === minScore) {
+            best.push(laneId);
+          }
         }
 
-        const fill = laneFillCount[laneId] ?? 0;
-        if (fill < minFill) {
-          minFill = fill;
-          best.length = 0;
-          best.push(laneId);
-          continue;
+        if (best.length === 0) {
+          return null;
         }
 
-        if (fill === minFill) {
-          best.push(laneId);
+        return Phaser.Utils.Array.GetRandom(best);
+      };
+
+      const calibrationActive = this.inserterCalibrationMs > 0;
+      if (calibrationActive && preferredType) {
+        const preferredLanes = candidateLaneIds.filter((laneId) => this.lanesById[laneId]?.desiredType === preferredType);
+        const preferredPick = chooseByFill(preferredLanes);
+        if (preferredPick) {
+          return preferredPick;
         }
       }
 
-      if (best.length === 0) {
-        return null;
-      }
-
-      return Phaser.Utils.Array.GetRandom(best);
+      return chooseByFill(candidateLaneIds);
     };
 
     const reachEpsilon = 0.001;
@@ -1957,7 +2602,8 @@ export default class GameScene extends Phaser.Scene {
       const candidate = findCandidateNearRow(rowPos, nextRowPos);
 
       if (candidate) {
-        const bestOverall = pickBalancedLane(laneIds);
+        const predictiveBias = candidate.predictivePullBoosted ? this.predictivePullBiasWeight : 0;
+        const bestOverall = pickBalancedLane(laneIds, candidate.type, predictiveBias);
         if (bestOverall === row.leftLaneId || bestOverall === row.rightLaneId) {
           candidate.mainPos = Math.min(candidate.mainPos, rowPos);
           this.transferToLane(candidate, bestOverall);
@@ -1973,7 +2619,8 @@ export default class GameScene extends Phaser.Scene {
       const candidate = findCandidateNearRow(rowPos);
 
       if (candidate) {
-        const bestBottom = pickBalancedLane([row.leftLaneId, row.rightLaneId]);
+        const predictiveBias = candidate.predictivePullBoosted ? this.predictivePullBiasWeight : 0;
+        const bestBottom = pickBalancedLane([row.leftLaneId, row.rightLaneId], candidate.type, predictiveBias);
         if (bestBottom) {
           candidate.mainPos = Math.min(candidate.mainPos, rowPos);
           this.transferToLane(candidate, bestBottom);
@@ -1992,7 +2639,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const closestToIntake = Math.min(...laneItems.map((item) => item.lanePos));
-    return closestToIntake >= this.itemSpacing;
+    return closestToIntake >= this.getActiveSideSpacing();
   }
 
   transferToLane(item, laneId) {
@@ -2040,7 +2687,7 @@ export default class GameScene extends Phaser.Scene {
           item.grabHandle.setPosition(destinationX, destinationY);
         }
       });
-      fallbackTween.timeScale = this.simTimeScale;
+      fallbackTween.timeScale = this.getEffectiveSimulationTimeScale();
       return;
     }
 
@@ -2123,19 +2770,114 @@ export default class GameScene extends Phaser.Scene {
                   duration: returnDuration,
                   ease: 'Sine.InOut'
                 });
-                resetTween.timeScale = this.simTimeScale;
+                resetTween.timeScale = this.getEffectiveSimulationTimeScale();
               }
             });
-            dropTween.timeScale = this.simTimeScale;
+            dropTween.timeScale = this.getEffectiveSimulationTimeScale();
           }
         });
-        rotateTween.timeScale = this.simTimeScale;
+        rotateTween.timeScale = this.getEffectiveSimulationTimeScale();
       }
     });
-    pickTween.timeScale = this.simTimeScale;
+    pickTween.timeScale = this.getEffectiveSimulationTimeScale();
+  }
+
+  animateLaneItemIntoChest(item, lane, awardScore = true) {
+    if (!item || !lane || item.motionLock || item.state === 'consuming') {
+      return false;
+    }
+
+    const finalizeAccept = () => {
+      this.acceptedCount += 1;
+      if (awardScore) {
+        this.handleComboConsume(item);
+      }
+      this.startChestIntake(item, lane);
+    };
+
+    if (!lane.chestClawContainer) {
+      item.motionLock = true;
+      finalizeAccept();
+      return true;
+    }
+
+    item.motionLock = true;
+    const claw = lane.chestClawContainer;
+    const baseAngle = typeof lane.chestClawBaseAngle === 'number' ? lane.chestClawBaseAngle : lane.direction > 0 ? 0 : 180;
+    const targetAngle = baseAngle + lane.direction * 180;
+    const armLength = typeof lane.clawArmLength === 'number' ? lane.clawArmLength : CLAW_ARM_LENGTH;
+
+    const speedFactorRaw = this.baseSideSpeed > 0 ? this.sideSpeed / this.baseSideSpeed : 1;
+    const speedFactor = Phaser.Math.Clamp(speedFactorRaw, 0.75, 3.25);
+    const pickDuration = Phaser.Math.Clamp(70 / speedFactor, 28, 70);
+    const rotateDuration = Phaser.Math.Clamp(210 / speedFactor, 80, 210);
+    const returnDuration = Phaser.Math.Clamp(180 / speedFactor, 70, 180);
+
+    const holdLength = armLength + CLAW_JAW_LENGTH * 0.75;
+
+    const getHandWorldAtAngle = (angleDeg) => {
+      const theta = Phaser.Math.DegToRad(angleDeg);
+      return {
+        x: claw.x + Math.cos(theta) * -holdLength,
+        y: claw.y + Math.sin(theta) * -holdLength
+      };
+    };
+
+    const syncToContainer = () => {
+      item.x = item.container.x;
+      item.y = item.container.y;
+      item.grabHandle.setPosition(item.x, item.y);
+    };
+
+    const placeAtHand = () => {
+      const hand = getHandWorldAtAngle(claw.angle);
+      item.x = hand.x;
+      item.y = hand.y;
+      item.container.setPosition(hand.x, hand.y);
+      item.grabHandle.setPosition(hand.x, hand.y);
+    };
+
+    this.tweens.killTweensOf(claw);
+    claw.setAngle(baseAngle);
+
+    const handStart = getHandWorldAtAngle(baseAngle);
+
+    const pickTween = this.tweens.add({
+      targets: item.container,
+      x: handStart.x,
+      y: handStart.y,
+      duration: pickDuration,
+      ease: 'Sine.Out',
+      onUpdate: syncToContainer,
+      onComplete: () => {
+        const rotateTween = this.tweens.add({
+          targets: claw,
+          angle: targetAngle,
+          duration: rotateDuration,
+          ease: 'Sine.InOut',
+          onUpdate: placeAtHand,
+          onComplete: () => {
+            finalizeAccept();
+            const resetTween = this.tweens.add({
+              targets: claw,
+              angle: baseAngle,
+              duration: returnDuration,
+              ease: 'Sine.InOut'
+            });
+            resetTween.timeScale = this.getEffectiveSimulationTimeScale();
+          }
+        });
+        rotateTween.timeScale = this.getEffectiveSimulationTimeScale();
+      }
+    });
+    pickTween.timeScale = this.getEffectiveSimulationTimeScale();
+
+    return true;
   }
 
   updateSideBelts(dt) {
+    const sideSpacing = this.getActiveSideSpacing();
+
     for (const laneConfig of LANE_LAYOUT) {
       const lane = this.lanesById[laneConfig.id];
       const laneItems = this.items
@@ -2144,7 +2886,7 @@ export default class GameScene extends Phaser.Scene {
 
       let frontPos = null;
       for (const item of laneItems) {
-        const maxAllowedPos = frontPos === null ? lane.length : Math.max(0, frontPos - this.itemSpacing);
+        const maxAllowedPos = frontPos === null ? lane.length : Math.max(0, frontPos - sideSpacing);
 
         if (item.state === 'side') {
           if (item.motionLock) {
@@ -2158,88 +2900,19 @@ export default class GameScene extends Phaser.Scene {
           if (item.lanePos >= lane.length) {
             item.lanePos = lane.length;
 
-            if (item.type === lane.desiredType) {
-              // Animate chest inserter claw
-              if (!item.motionLock && lane.chestClawContainer) {
-                item.motionLock = true;
-                const claw = lane.chestClawContainer;
-                const baseAngle = typeof lane.chestClawBaseAngle === 'number' ? lane.chestClawBaseAngle : (lane.direction > 0 ? 0 : 180);
-                const targetAngle = baseAngle + lane.direction * 180;
-                const armLength = typeof lane.clawArmLength === 'number' ? lane.clawArmLength : CLAW_ARM_LENGTH;
+            const isCorrectLane = item.type === lane.desiredType;
+            const shouldGraceAccept = !isCorrectLane && this.hasChestPriorityCharge(lane.id);
 
-                const speedFactorRaw = this.baseSideSpeed > 0 ? this.sideSpeed / this.baseSideSpeed : 1;
-                const speedFactor = Phaser.Math.Clamp(speedFactorRaw, 0.75, 3.25);
-                const pickDuration = Phaser.Math.Clamp(70 / speedFactor, 28, 70);
-                const rotateDuration = Phaser.Math.Clamp(210 / speedFactor, 80, 210);
-                const dropDuration = Phaser.Math.Clamp(80 / speedFactor, 28, 80);
-                const returnDuration = Phaser.Math.Clamp(180 / speedFactor, 70, 180);
-
-                const holdLength = armLength + CLAW_JAW_LENGTH * 0.75;
-
-                const getHandWorldAtAngle = (angleDeg) => {
-                  const theta = Phaser.Math.DegToRad(angleDeg);
-                  return {
-                    x: claw.x + Math.cos(theta) * -holdLength,
-                    y: claw.y + Math.sin(theta) * -holdLength
-                  };
-                };
-
-                const syncToContainer = () => {
-                  item.x = item.container.x;
-                  item.y = item.container.y;
-                  item.grabHandle.setPosition(item.x, item.y);
-                };
-
-                const placeAtHand = () => {
-                  const hand = getHandWorldAtAngle(claw.angle);
-                  item.x = hand.x;
-                  item.y = hand.y;
-                  item.container.setPosition(hand.x, hand.y);
-                  item.grabHandle.setPosition(hand.x, hand.y);
-                };
-
-                this.tweens.killTweensOf(claw);
-                claw.setAngle(baseAngle);
-
-                const handStart = getHandWorldAtAngle(baseAngle);
-
-                const pickTween = this.tweens.add({
-                  targets: item.container,
-                  x: handStart.x,
-                  y: handStart.y,
-                  duration: pickDuration,
-                  ease: 'Sine.Out',
-                  onUpdate: syncToContainer,
-                  onComplete: () => {
-                    const rotateTween = this.tweens.add({
-                      targets: claw,
-                      angle: targetAngle,
-                      duration: rotateDuration,
-                      ease: 'Sine.InOut',
-                      onUpdate: placeAtHand,
-                      onComplete: () => {
-                        // Remove item and play chest animation
-                        this.acceptedCount += 1;
-                        this.handleComboConsume();
-                        this.startChestIntake(item, lane);
-                        const resetTween = this.tweens.add({
-                          targets: claw,
-                          angle: baseAngle,
-                          duration: returnDuration,
-                          ease: 'Sine.InOut'
-                        });
-                        resetTween.timeScale = this.simTimeScale;
-                      }
-                    });
-                    rotateTween.timeScale = this.simTimeScale;
-                  }
-                });
-                pickTween.timeScale = this.simTimeScale;
+            if (isCorrectLane || shouldGraceAccept) {
+              if (shouldGraceAccept) {
+                this.consumeChestPriorityCharge(lane.id);
               }
+
+              this.animateLaneItemIntoChest(item, lane, isCorrectLane);
             } else {
               item.state = 'jammed';
               this.rejectedCount += 1;
-              this.breakCombo();
+              this.breakCombo('jam');
               this.applyItemStateTint(item, 0x64748b);
 
               this.tweens.killTweensOf(item.container);
