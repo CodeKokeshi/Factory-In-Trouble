@@ -51,8 +51,11 @@ const SPRITE_URL_GLOBS = {
 };
 
 const CHEST_SPRITE_GLOB = import.meta.glob('../../assets/sprites/chest/*.png', { eager: true, import: 'default' });
+const AUDIO_SFX_GLOB = import.meta.glob('../../assets/audio/*', { eager: true, import: 'default' });
 const CHEST_CLOSED_KEY = 'chest_closed';
 const CHEST_OPENED_KEY = 'chest_opened';
+const GRAB_SFX_KEY = 'sfx_grab';
+const CLAW_SQUEAK_SFX_KEY = 'sfx_claw_squeak';
 
 function findFirstMatchUrl(spriteGlob, matcher) {
   const match = Object.entries(spriteGlob).find(([path]) => matcher.test(path));
@@ -61,6 +64,10 @@ function findFirstMatchUrl(spriteGlob, matcher) {
 
 const CHEST_CLOSED_URL = findFirstMatchUrl(CHEST_SPRITE_GLOB, /closed\.png$/i);
 const CHEST_OPENED_URL = findFirstMatchUrl(CHEST_SPRITE_GLOB, /opened\.png$/i);
+const GRAB_OGG_URL = findFirstMatchUrl(AUDIO_SFX_GLOB, /grab\.ogg$/i);
+const GRAB_MP3_URL = findFirstMatchUrl(AUDIO_SFX_GLOB, /grab\.mp3$/i);
+const CLAW_SQUEAK_OGG_URL = findFirstMatchUrl(AUDIO_SFX_GLOB, /claw_squeak\.ogg$/i);
+const CLAW_SQUEAK_MP3_URL = findFirstMatchUrl(AUDIO_SFX_GLOB, /claw_squeak\.mp3$/i);
 
 function collectSpriteUrls(spriteGlob, maxCount = MAX_SPRITES_PER_TYPE) {
   return Object.entries(spriteGlob)
@@ -339,6 +346,16 @@ export default class GameScene extends Phaser.Scene {
     }
     if (CHEST_OPENED_URL) {
       this.load.image(CHEST_OPENED_KEY, CHEST_OPENED_URL);
+    }
+
+    const grabAudioSources = [GRAB_OGG_URL, GRAB_MP3_URL].filter(Boolean);
+    if (grabAudioSources.length > 0) {
+      this.load.audio(GRAB_SFX_KEY, grabAudioSources);
+    }
+
+    const clawSqueakAudioSources = [CLAW_SQUEAK_OGG_URL, CLAW_SQUEAK_MP3_URL].filter(Boolean);
+    if (clawSqueakAudioSources.length > 0) {
+      this.load.audio(CLAW_SQUEAK_SFX_KEY, clawSqueakAudioSources);
     }
 
     FOOD_TYPES.forEach((food) => {
@@ -664,6 +681,75 @@ export default class GameScene extends Phaser.Scene {
       filter.disconnect();
       amp.disconnect();
     };
+  }
+
+  playLoadedSfxWithVariation(
+    key,
+    {
+      intensity = 1,
+      baseVolume = 0.3,
+      volumeJitter = 0.03,
+      baseDetune = 0,
+      detuneRange = 35,
+      baseRate = 1,
+      rateJitter = 0.025
+    } = {}
+  ) {
+    if (!this.sound || !this.cache?.audio?.exists(key)) {
+      return;
+    }
+
+    const amount = Phaser.Math.Clamp(intensity, 0.2, 2.2);
+    const volume = Phaser.Math.Clamp(
+      baseVolume * amount + Phaser.Math.FloatBetween(-volumeJitter, volumeJitter),
+      0.01,
+      1
+    );
+    const detune = Phaser.Math.Clamp(
+      baseDetune + Phaser.Math.FloatBetween(-detuneRange, detuneRange),
+      -1200,
+      1200
+    );
+    const rate = Phaser.Math.Clamp(baseRate + Phaser.Math.FloatBetween(-rateJitter, rateJitter), 0.8, 1.25);
+
+    this.sound.play(key, {
+      volume,
+      detune,
+      rate
+    });
+  }
+
+  playGrabSfx(intensity = 1) {
+    this.playLoadedSfxWithVariation(GRAB_SFX_KEY, {
+      intensity,
+      baseVolume: 0.34,
+      volumeJitter: 0.035,
+      detuneRange: 50,
+      rateJitter: 0.03
+    });
+  }
+
+  playClawSqueakSfx(stage = 'move', intensity = 1) {
+    let baseDetune = 0;
+    let baseRate = 1;
+
+    if (stage === 'pickup') {
+      baseDetune = -16;
+      baseRate = 0.985;
+    } else if (stage === 'drop') {
+      baseDetune = 16;
+      baseRate = 1.02;
+    }
+
+    this.playLoadedSfxWithVariation(CLAW_SQUEAK_SFX_KEY, {
+      intensity,
+      baseVolume: 0.24,
+      volumeJitter: 0.03,
+      baseDetune,
+      detuneRange: 32,
+      baseRate,
+      rateJitter: 0.022
+    });
   }
 
   playSfx(eventId, intensity = 1) {
@@ -3252,7 +3338,7 @@ export default class GameScene extends Phaser.Scene {
     item.motionLock = true;
     this.setSlowMotion(true);
     this.emitTransferParticles(item.x, item.y, item.baseColor, 8);
-    this.playSfx('drag-start', 0.9);
+    this.playGrabSfx(0.9);
     this.rumble(0.16, 0.1, 48);
 
     gameObject.input.cursor = 'grabbing';
@@ -3775,9 +3861,9 @@ export default class GameScene extends Phaser.Scene {
 
     this.tweens.killTweensOf(claw);
     claw.setAngle(baseAngle);
-    this.playSfx('transfer', 0.95);
 
     const startPickup = () => {
+      this.playClawSqueakSfx('pickup', 0.9);
       const handStart = getHandWorldAtAngle(baseAngle);
 
       const pickTween = this.tweens.add({
@@ -3788,6 +3874,7 @@ export default class GameScene extends Phaser.Scene {
         ease: 'Sine.Out',
         onUpdate: syncToContainer,
         onComplete: () => {
+          this.playClawSqueakSfx('move', 0.98);
           const rotateTween = this.tweens.add({
             targets: claw,
             angle: targetAngle,
@@ -3795,6 +3882,7 @@ export default class GameScene extends Phaser.Scene {
             ease: 'Sine.InOut',
             onUpdate: placeAtHand,
             onComplete: () => {
+              this.playClawSqueakSfx('drop', 0.92);
               const dropTween = this.tweens.add({
                 targets: item.container,
                 x: destinationX,
@@ -3925,9 +4013,9 @@ export default class GameScene extends Phaser.Scene {
 
     this.tweens.killTweensOf(claw);
     claw.setAngle(baseAngle);
-    this.playSfx('transfer', 0.72);
 
     const startPickup = () => {
+      this.playClawSqueakSfx('pickup', 0.78);
       const handStart = getHandWorldAtAngle(baseAngle);
 
       const pickTween = this.tweens.add({
@@ -3938,6 +4026,7 @@ export default class GameScene extends Phaser.Scene {
         ease: 'Sine.Out',
         onUpdate: syncToContainer,
         onComplete: () => {
+          this.playClawSqueakSfx('move', 0.84);
           const rotateTween = this.tweens.add({
             targets: claw,
             angle: targetAngle,
@@ -3945,6 +4034,7 @@ export default class GameScene extends Phaser.Scene {
             ease: 'Sine.InOut',
             onUpdate: placeAtHand,
             onComplete: () => {
+              this.playClawSqueakSfx('drop', 0.8);
               finalizeAccept();
               const resetTween = this.tweens.add({
                 targets: claw,
