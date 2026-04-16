@@ -2554,6 +2554,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.updateCardEffects(manualScaledDeltaMs);
     this.updateDifficulty();
+    this.recoverStaleMotionLocks();
 
     this.spawnBlockedThisFrame = false;
 
@@ -2983,6 +2984,64 @@ export default class GameScene extends Phaser.Scene {
     return this.items.find((item) => item.id === itemId) || null;
   }
 
+  isItemMotionTweenActive(item) {
+    if (!item) {
+      return false;
+    }
+
+    if (item.container?.active && this.tweens.isTweening(item.container)) {
+      return true;
+    }
+
+    if ((item.state === 'side' || item.state === 'jammed') && item.laneId) {
+      const lane = this.lanesById[item.laneId];
+      if (lane?.clawContainer?.active && this.tweens.isTweening(lane.clawContainer)) {
+        return true;
+      }
+      if (lane?.chestClawContainer?.active && this.tweens.isTweening(lane.chestClawContainer)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  ensureGrabHandleReady(item) {
+    if (!item?.grabHandle?.active) {
+      return;
+    }
+
+    if (!item.grabHandle.input?.enabled) {
+      item.grabHandle.setInteractive({ useHandCursor: true });
+      this.input.setDraggable(item.grabHandle);
+    }
+
+    if (item.grabHandle.input) {
+      item.grabHandle.input.cursor = 'grab';
+    }
+  }
+
+  recoverStaleMotionLocks() {
+    const draggedItemId = this.dragContext?.itemId ?? null;
+
+    for (const item of this.items) {
+      if (!item?.motionLock) {
+        continue;
+      }
+
+      if (item.id === draggedItemId || item.state === 'dragging' || item.state === 'consuming') {
+        continue;
+      }
+
+      if (this.isItemMotionTweenActive(item)) {
+        continue;
+      }
+
+      item.motionLock = false;
+      this.ensureGrabHandleReady(item);
+    }
+  }
+
   captureItemSlot(item) {
     return {
       state: item.state,
@@ -3171,7 +3230,16 @@ export default class GameScene extends Phaser.Scene {
 
     const itemId = gameObject.getData('itemId');
     const item = this.getItemById(itemId);
-    if (!item || item.state === 'consuming' || item.motionLock) {
+    if (!item || item.state === 'consuming') {
+      return;
+    }
+
+    if (item.motionLock && !this.isItemMotionTweenActive(item)) {
+      item.motionLock = false;
+      this.ensureGrabHandleReady(item);
+    }
+
+    if (item.motionLock) {
       return;
     }
 
