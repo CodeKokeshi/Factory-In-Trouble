@@ -224,6 +224,9 @@ export default class GameScene extends Phaser.Scene {
     this.audioMasterGain = null;
     this.audioMusicGain = null;
     this.audioSfxGain = null;
+    this.audioCompressor = null;
+    this.audioMasterTone = null;
+    this.audioNoiseBuffer = null;
     this.musicBeatTimerMs = 0;
     this.musicBeatMs = 60000 / 96;
     this.musicStepIndex = 0;
@@ -425,14 +428,38 @@ export default class GameScene extends Phaser.Scene {
     this.audioMasterGain = ctx.createGain();
     this.audioMusicGain = ctx.createGain();
     this.audioSfxGain = ctx.createGain();
+    this.audioCompressor = typeof ctx.createDynamicsCompressor === 'function' ? ctx.createDynamicsCompressor() : null;
+    this.audioMasterTone = ctx.createBiquadFilter();
 
-    this.audioMasterGain.gain.value = 0.36;
+    this.audioMasterTone.type = 'lowpass';
+    this.audioMasterTone.frequency.value = 13000;
+    this.audioMasterTone.Q.value = 0.6;
+
+    if (this.audioCompressor) {
+      this.audioCompressor.threshold.setValueAtTime(-22, ctx.currentTime);
+      this.audioCompressor.knee.setValueAtTime(20, ctx.currentTime);
+      this.audioCompressor.ratio.setValueAtTime(4.5, ctx.currentTime);
+      this.audioCompressor.attack.setValueAtTime(0.003, ctx.currentTime);
+      this.audioCompressor.release.setValueAtTime(0.18, ctx.currentTime);
+    }
+
+    this.audioMasterGain.gain.value = 1.08;
     this.audioMusicGain.gain.value = 0.001;
-    this.audioSfxGain.gain.value = 0.75;
+    this.audioSfxGain.gain.value = 1.35;
 
     this.audioMusicGain.connect(this.audioMasterGain);
     this.audioSfxGain.connect(this.audioMasterGain);
-    this.audioMasterGain.connect(ctx.destination);
+
+    if (this.audioCompressor) {
+      this.audioMasterGain.connect(this.audioCompressor);
+      this.audioCompressor.connect(this.audioMasterTone);
+      this.audioMasterTone.connect(ctx.destination);
+    } else {
+      this.audioMasterGain.connect(this.audioMasterTone);
+      this.audioMasterTone.connect(ctx.destination);
+    }
+
+    this.audioNoiseBuffer = this.createNoiseBuffer();
 
     this.audioEnabled = true;
     this.audioUnlocked = ctx.state === 'running';
@@ -440,31 +467,147 @@ export default class GameScene extends Phaser.Scene {
     this.input.on('pointerdown', this.unlockAudioContext, this);
     this.input.keyboard?.on('keydown', this.unlockAudioContext, this);
     this.input.gamepad?.on('down', this.unlockAudioContext, this);
-
-    if (this.audioUnlocked) {
-      this.playSfx('spawn', 0.85);
-    }
   }
 
-  async unlockAudioContext() {
+  createNoiseBuffer() {
+    if (!this.audioCtx || typeof this.audioCtx.createBuffer !== 'function') {
+      return null;
+    }
+
+    const sampleRate = this.audioCtx.sampleRate || 44100;
+    const buffer = this.audioCtx.createBuffer(1, sampleRate, sampleRate);
+    const data = buffer.getChannelData(0);
+
+    for (let i = 0; i < data.length; i += 1) {
+      data[i] = (Math.random() * 2 - 1) * 0.85;
+    }
+
+    return buffer;
+  }
+
+  unlockAudioContext() {
     if (!this.audioCtx) {
       return;
     }
 
+    const onUnlocked = () => {
+      this.audioUnlocked = this.audioCtx?.state === 'running';
+      if (!this.audioUnlocked) {
+        return;
+      }
+
+      this.input.off('pointerdown', this.unlockAudioContext, this);
+      this.input.keyboard?.off('keydown', this.unlockAudioContext, this);
+      this.input.gamepad?.off('down', this.unlockAudioContext, this);
+
+      // Play a short, obvious confirmation burst after unlock.
+      this.playDrumHit('kick', 1.15, 'sfx');
+      this.playSfx('transfer', 1.2);
+      this.time.delayedCall(120, () => this.playSfx('combo-tier', 1.2));
+    };
+
     try {
       if (this.audioCtx.state !== 'running' && typeof this.audioCtx.resume === 'function') {
-        await this.audioCtx.resume();
+        const resumeResult = this.audioCtx.resume();
+        if (resumeResult && typeof resumeResult.then === 'function') {
+          resumeResult.then(onUnlocked).catch(() => {});
+        } else {
+          onUnlocked();
+        }
+      } else {
+        onUnlocked();
       }
     } catch {
       // Keep listeners active for the next interaction attempt.
     }
+  }
 
-    this.audioUnlocked = this.audioCtx.state === 'running';
-    if (this.audioUnlocked) {
-      this.input.off('pointerdown', this.unlockAudioContext, this);
-      this.input.keyboard?.off('keydown', this.unlockAudioContext, this);
-      this.input.gamepad?.off('down', this.unlockAudioContext, this);
-      this.playSfx('spawn', 0.95);
+  playNoiseBurst({
+    duration = 0.08,
+    gain = 0.07,
+    highpass = 1200,
+    lowpass = 12000,
+    destination = 'sfx'
+  } = {}) {
+    if (!this.audioEnabled || !this.audioUnlocked || !this.audioCtx || !this.audioNoiseBuffer) {
+      return;
+    }
+
+    const outputGain = destination === 'music' ? this.audioMusicGain : this.audioSfxGain;
+    if (!outputGain) {
+      return;
+    }
+
+    const now = this.audioCtx.currentTime;
+    const source = this.audioCtx.createBufferSource();
+    source.buffer = this.audioNoiseBuffer;
+
+    const hp = this.audioCtx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(Math.max(40, highpass), now);
+
+    const lp = this.audioCtx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(Math.max(120, lowpass), now);
+
+    const amp = this.audioCtx.createGain();
+    const peak = Phaser.Math.Clamp(gain * 1.8, 0.0002, 1.2);
+
+    amp.gain.setValueAtTime(0.0001, now);
+    amp.gain.exponentialRampToValueAtTime(peak, now + 0.003);
+    amp.gain.exponentialRampToValueAtTime(0.0001, now + Math.max(0.02, duration));
+
+    source.connect(hp);
+    hp.connect(lp);
+    lp.connect(amp);
+    amp.connect(outputGain);
+
+    const stopAt = now + Math.max(0.03, duration + 0.03);
+    source.start(now);
+    source.stop(stopAt);
+    source.onended = () => {
+      source.disconnect();
+      hp.disconnect();
+      lp.disconnect();
+      amp.disconnect();
+    };
+  }
+
+  playDrumHit(kind, intensity = 1, destination = 'music') {
+    const amount = Phaser.Math.Clamp(intensity, 0.15, 2.3);
+
+    if (kind === 'kick') {
+      this.playSynthTone({
+        freq: 132,
+        targetFreq: 38,
+        type: 'sine',
+        attack: 0.001,
+        decay: 0.25,
+        gain: 0.14 * amount,
+        filterFreq: 260,
+        destination
+      });
+      this.playNoiseBurst({ duration: 0.018, gain: 0.02 * amount, highpass: 1800, lowpass: 9000, destination });
+      return;
+    }
+
+    if (kind === 'snare') {
+      this.playNoiseBurst({ duration: 0.12, gain: 0.12 * amount, highpass: 900, lowpass: 6200, destination });
+      this.playSynthTone({
+        freq: 230,
+        targetFreq: 168,
+        type: 'triangle',
+        attack: 0.001,
+        decay: 0.1,
+        gain: 0.05 * amount,
+        filterFreq: 1800,
+        destination
+      });
+      return;
+    }
+
+    if (kind === 'hat') {
+      this.playNoiseBurst({ duration: 0.045, gain: 0.06 * amount, highpass: 5000, lowpass: 13000, destination });
     }
   }
 
@@ -476,6 +619,8 @@ export default class GameScene extends Phaser.Scene {
     decay = 0.09,
     gain = 0.07,
     filterFreq = 1600,
+    filterType = 'lowpass',
+    q = 0.6,
     destination = 'sfx'
   } = {}) {
     if (!this.audioEnabled || !this.audioUnlocked || !this.audioCtx) {
@@ -498,10 +643,11 @@ export default class GameScene extends Phaser.Scene {
       osc.frequency.exponentialRampToValueAtTime(Math.max(24, targetFreq), now + Math.max(0.02, attack + decay));
     }
 
-    filter.type = 'lowpass';
+    filter.type = filterType;
     filter.frequency.setValueAtTime(Math.max(80, filterFreq), now);
+    filter.Q.setValueAtTime(Math.max(0, q), now);
 
-    const peak = Phaser.Math.Clamp(Math.max(0.0002, gain * 2.2), 0.0002, 0.72);
+    const peak = Phaser.Math.Clamp(Math.max(0.0002, gain * 4.8), 0.0002, 1.35);
     amp.gain.setValueAtTime(0.0001, now);
     amp.gain.exponentialRampToValueAtTime(peak, now + Math.max(0.002, attack));
     amp.gain.exponentialRampToValueAtTime(0.0001, now + Math.max(0.02, attack + decay));
@@ -523,67 +669,95 @@ export default class GameScene extends Phaser.Scene {
   playSfx(eventId, intensity = 1) {
     const amount = Phaser.Math.Clamp(intensity, 0.2, 2.2);
 
+    // Keep SFX focused on core game actions only.
+    if (
+      eventId !== 'transfer'
+      && eventId !== 'jam'
+      && eventId !== 'chest-accept'
+      && eventId !== 'combo-tier'
+      && eventId !== 'combo-break'
+      && eventId !== 'game-over'
+    ) {
+      return;
+    }
+
     if (eventId === 'spawn') {
-      this.playSynthTone({ freq: 520 + Math.random() * 120, targetFreq: 430, type: 'triangle', attack: 0.002, decay: 0.05, gain: 0.03 * amount, filterFreq: 1900 });
+      this.playDrumHit('kick', 0.45 * amount, 'sfx');
+      this.playSynthTone({ freq: 300 + Math.random() * 50, targetFreq: 170, type: 'square', attack: 0.001, decay: 0.095, gain: 0.05 * amount, filterFreq: 1300 });
+      this.playNoiseBurst({ duration: 0.03, gain: 0.018 * amount, highpass: 2800, lowpass: 10500, destination: 'sfx' });
       return;
     }
 
     if (eventId === 'transfer') {
-      this.playSynthTone({ freq: 260 + Math.random() * 60, targetFreq: 360, type: 'triangle', attack: 0.002, decay: 0.06, gain: 0.04 * amount, filterFreq: 1600 });
+      this.playSynthTone({ freq: 240 + Math.random() * 40, targetFreq: 330, type: 'square', attack: 0.001, decay: 0.055, gain: 0.055 * amount, filterFreq: 2100 });
+      this.playDrumHit('hat', 0.55 * amount, 'sfx');
       return;
     }
 
     if (eventId === 'drag-start') {
-      this.playSynthTone({ freq: 210, targetFreq: 320, type: 'sawtooth', attack: 0.003, decay: 0.08, gain: 0.04 * amount, filterFreq: 1100 });
+      this.playSynthTone({ freq: 180, targetFreq: 88, type: 'sawtooth', attack: 0.0015, decay: 0.14, gain: 0.07 * amount, filterFreq: 940, q: 1 });
+      this.playNoiseBurst({ duration: 0.045, gain: 0.024 * amount, highpass: 700, lowpass: 4500, destination: 'sfx' });
       return;
     }
 
     if (eventId === 'swap') {
-      this.playSynthTone({ freq: 270, targetFreq: 420, type: 'triangle', attack: 0.002, decay: 0.07, gain: 0.05 * amount, filterFreq: 1750 });
-      this.playSynthTone({ freq: 520, targetFreq: 460, type: 'sine', attack: 0.001, decay: 0.05, gain: 0.03 * amount, filterFreq: 2200 });
+      this.playSynthTone({ freq: 240, targetFreq: 390, type: 'triangle', attack: 0.001, decay: 0.09, gain: 0.07 * amount, filterFreq: 1800 });
+      this.playSynthTone({ freq: 390, targetFreq: 520, type: 'sine', attack: 0.001, decay: 0.06, gain: 0.05 * amount, filterFreq: 2600 });
+      this.playDrumHit('hat', 0.65 * amount, 'sfx');
       return;
     }
 
     if (eventId === 'chest-accept') {
-      this.playSynthTone({ freq: 460, targetFreq: 690, type: 'triangle', attack: 0.001, decay: 0.09, gain: 0.045 * amount, filterFreq: 2200 });
+      this.playSynthTone({ freq: 360, targetFreq: 620, type: 'triangle', attack: 0.001, decay: 0.11, gain: 0.07 * amount, filterFreq: 2500 });
+      this.playSynthTone({ freq: 620, targetFreq: 830, type: 'sine', attack: 0.001, decay: 0.09, gain: 0.05 * amount, filterFreq: 2900 });
+      this.playDrumHit('kick', 0.3 * amount, 'sfx');
       return;
     }
 
     if (eventId === 'combo-tier') {
-      this.playSynthTone({ freq: 370, targetFreq: 560, type: 'triangle', attack: 0.002, decay: 0.1, gain: 0.05 * amount, filterFreq: 2400 });
-      this.playSynthTone({ freq: 560, targetFreq: 740, type: 'sine', attack: 0.001, decay: 0.14, gain: 0.042 * amount, filterFreq: 3000 });
+      this.playDrumHit('kick', 0.72 * amount, 'sfx');
+      this.playDrumHit('snare', 0.6 * amount, 'sfx');
+      this.playSynthTone({ freq: 280, targetFreq: 520, type: 'sawtooth', attack: 0.001, decay: 0.14, gain: 0.075 * amount, filterFreq: 2100 });
+      this.playSynthTone({ freq: 520, targetFreq: 770, type: 'triangle', attack: 0.001, decay: 0.13, gain: 0.06 * amount, filterFreq: 2800 });
       return;
     }
 
     if (eventId === 'combo-break') {
-      this.playSynthTone({ freq: 220, targetFreq: 120, type: 'sawtooth', attack: 0.001, decay: 0.13, gain: 0.05 * amount, filterFreq: 1000 });
+      this.playSynthTone({ freq: 230, targetFreq: 82, type: 'square', attack: 0.001, decay: 0.2, gain: 0.08 * amount, filterFreq: 920 });
+      this.playDrumHit('snare', 0.55 * amount, 'sfx');
       return;
     }
 
     if (eventId === 'jam') {
-      this.playSynthTone({ freq: 160, targetFreq: 68, type: 'square', attack: 0.001, decay: 0.18, gain: 0.08 * amount, filterFreq: 740 });
-      this.playSynthTone({ freq: 840, targetFreq: 310, type: 'square', attack: 0.001, decay: 0.07, gain: 0.04 * amount, filterFreq: 1200 });
+      this.playDrumHit('kick', 1.1 * amount, 'sfx');
+      this.playDrumHit('snare', 0.95 * amount, 'sfx');
+      this.playSynthTone({ freq: 190, targetFreq: 62, type: 'square', attack: 0.001, decay: 0.24, gain: 0.12 * amount, filterFreq: 820, q: 1.2 });
+      this.playNoiseBurst({ duration: 0.14, gain: 0.1 * amount, highpass: 900, lowpass: 8200, destination: 'sfx' });
       return;
     }
 
     if (eventId === 'draft-open') {
-      this.playSynthTone({ freq: 200, targetFreq: 430, type: 'triangle', attack: 0.002, decay: 0.2, gain: 0.06 * amount, filterFreq: 1900 });
+      this.playSynthTone({ freq: 180, targetFreq: 540, type: 'sawtooth', attack: 0.004, decay: 0.24, gain: 0.08 * amount, filterFreq: 2000 });
+      this.playNoiseBurst({ duration: 0.1, gain: 0.05 * amount, highpass: 2400, lowpass: 12000, destination: 'sfx' });
       return;
     }
 
     if (eventId === 'draft-select') {
-      this.playSynthTone({ freq: 430, targetFreq: 500, type: 'sine', attack: 0.001, decay: 0.04, gain: 0.03 * amount, filterFreq: 2400 });
+      this.playSynthTone({ freq: 420, targetFreq: 590, type: 'square', attack: 0.001, decay: 0.05, gain: 0.05 * amount, filterFreq: 2900 });
       return;
     }
 
     if (eventId === 'draft-pick') {
-      this.playSynthTone({ freq: 290, targetFreq: 620, type: 'triangle', attack: 0.002, decay: 0.18, gain: 0.065 * amount, filterFreq: 2300 });
-      this.playSynthTone({ freq: 620, targetFreq: 780, type: 'sine', attack: 0.001, decay: 0.12, gain: 0.045 * amount, filterFreq: 2600 });
+      this.playDrumHit('kick', 0.8 * amount, 'sfx');
+      this.playSynthTone({ freq: 260, targetFreq: 620, type: 'triangle', attack: 0.001, decay: 0.2, gain: 0.09 * amount, filterFreq: 2300 });
+      this.playSynthTone({ freq: 420, targetFreq: 830, type: 'sine', attack: 0.001, decay: 0.16, gain: 0.07 * amount, filterFreq: 2800 });
       return;
     }
 
     if (eventId === 'game-over') {
-      this.playSynthTone({ freq: 210, targetFreq: 70, type: 'square', attack: 0.001, decay: 0.36, gain: 0.08 * amount, filterFreq: 860 });
+      this.playDrumHit('kick', 1.25 * amount, 'sfx');
+      this.playSynthTone({ freq: 210, targetFreq: 56, type: 'square', attack: 0.001, decay: 0.44, gain: 0.12 * amount, filterFreq: 760 });
+      this.playNoiseBurst({ duration: 0.22, gain: 0.1 * amount, highpass: 420, lowpass: 5600, destination: 'sfx' });
     }
   }
 
@@ -591,51 +765,88 @@ export default class GameScene extends Phaser.Scene {
     const step = this.musicStepIndex;
     this.musicStepIndex += 1;
 
-    const bassPattern = [82.41, 73.42, 98, 110];
-    const leadPattern = [220, 246.94, 261.63, 293.66, 329.63, 392];
+    const barStep = step % 16;
+    const barIndex = Math.floor(step / 16) % 4;
+    const rootPattern = [55, 65.41, 49, 73.42];
+    const root = rootPattern[barIndex];
+    const pressureMix = Phaser.Math.Clamp(pressure * 0.75 + jamLoad * 0.35, 0, 1);
 
-    const bassFreq = bassPattern[step % bassPattern.length] * (jamLoad > 0.35 ? 0.94 : 1);
-    const bassGain = 0.018 + pressure * 0.018 + jamLoad * 0.01;
-    this.playSynthTone({
-      freq: bassFreq,
-      targetFreq: bassFreq * 0.95,
-      type: 'sawtooth',
-      attack: 0.003,
-      decay: 0.2,
-      gain: bassGain,
-      filterFreq: 360 + pressure * 340,
-      destination: 'music'
-    });
+    if (barStep % 4 === 0 || (pressure > 0.62 && barStep % 8 === 6)) {
+      this.playDrumHit('kick', 0.8 + pressure * 0.4, 'music');
+    }
+    if (barStep % 8 === 4) {
+      this.playDrumHit('snare', 0.78 + jamLoad * 0.55, 'music');
+    }
+    if (barStep % 2 === 1) {
+      this.playDrumHit('hat', 0.32 + pressure * 0.35, 'music');
+    }
 
-    if (step % 2 === 0) {
-      const leadFreq = leadPattern[(step + (pressure > 0.55 ? 2 : 0)) % leadPattern.length];
-      const leadGain = 0.012 + pressure * 0.016;
+    if (barStep % 2 === 0) {
+      const bassFreq = root * (barStep % 8 < 4 ? 1 : 1.12);
       this.playSynthTone({
-        freq: leadFreq,
-        targetFreq: leadFreq * 1.03,
-        type: 'triangle',
-        attack: 0.001,
-        decay: 0.1,
-        gain: leadGain,
-        filterFreq: 1300 + pressure * 900,
+        freq: bassFreq,
+        targetFreq: bassFreq * 0.92,
+        type: 'sawtooth',
+        attack: 0.002,
+        decay: 0.22,
+        gain: 0.05 + pressure * 0.03,
+        filterFreq: 340 + pressure * 330,
         destination: 'music'
       });
     }
 
-    if (jamLoad > 0.15 && step % 2 === 1) {
+    if (barStep % 8 === 0) {
+      const chordRoot = root * 2;
       this.playSynthTone({
-        freq: 760 + jamLoad * 280,
-        targetFreq: 520,
+        freq: chordRoot,
+        targetFreq: chordRoot * 0.98,
+        type: 'triangle',
+        attack: 0.002,
+        decay: 0.18,
+        gain: 0.045 + pressure * 0.02,
+        filterFreq: 1500 + pressure * 700,
+        destination: 'music'
+      });
+      this.playSynthTone({
+        freq: chordRoot * 1.1892,
+        targetFreq: chordRoot * 1.1892 * 0.99,
+        type: 'triangle',
+        attack: 0.002,
+        decay: 0.18,
+        gain: 0.034 + pressure * 0.016,
+        filterFreq: 1700 + pressure * 700,
+        destination: 'music'
+      });
+      this.playSynthTone({
+        freq: chordRoot * 1.4983,
+        targetFreq: chordRoot * 1.4983 * 0.99,
+        type: 'triangle',
+        attack: 0.002,
+        decay: 0.16,
+        gain: 0.028 + pressure * 0.013,
+        filterFreq: 1900 + pressure * 700,
+        destination: 'music'
+      });
+    }
+
+    if (pressureMix > 0.52 && barStep % 4 === 2) {
+      this.playSynthTone({
+        freq: 680 + pressureMix * 180,
+        targetFreq: 430,
         type: 'square',
         attack: 0.001,
-        decay: 0.05,
-        gain: 0.008 + jamLoad * 0.012,
-        filterFreq: 2400,
+        decay: 0.07,
+        gain: 0.028 + pressureMix * 0.03,
+        filterFreq: 2200,
         destination: 'music'
       });
     }
 
-    this.rhythmPulseMs = Math.max(this.rhythmPulseMs, 130);
+    if (jamLoad > 0.25 && barStep % 4 === 3) {
+      this.playNoiseBurst({ duration: 0.07, gain: 0.03 + jamLoad * 0.03, highpass: 2500, lowpass: 9000, destination: 'music' });
+    }
+
+    this.rhythmPulseMs = Math.max(this.rhythmPulseMs, 110);
   }
 
   updateAudio(deltaMs) {
@@ -658,12 +869,18 @@ export default class GameScene extends Phaser.Scene {
     const jamLoad = Phaser.Math.Clamp(jammedCount / Math.max(1, LANE_LAYOUT.length * 2), 0, 1);
     const now = this.audioCtx.currentTime;
 
-    const targetMaster = this.isGameOver ? 0.22 : 0.34;
+    const targetMaster = this.isGameOver ? 0.65 : 1.05;
     this.audioMasterGain.gain.cancelScheduledValues(now);
     this.audioMasterGain.gain.linearRampToValueAtTime(targetMaster, now + 0.12);
 
+    const targetSfxGain = this.audioUnlocked && !this.isGameOver
+      ? 1.22 + pressure * 0.24
+      : 1.1;
+    this.audioSfxGain.gain.cancelScheduledValues(now);
+    this.audioSfxGain.gain.linearRampToValueAtTime(targetSfxGain, now + 0.12);
+
     const targetMusicGain = this.audioUnlocked && !this.isGameOver
-      ? (this.isDraftActive ? 0.025 : 0.035 + pressure * 0.06 + jamLoad * 0.03)
+      ? (this.isDraftActive ? 0.09 : 0.13 + pressure * 0.18 + jamLoad * 0.08)
       : 0.001;
     this.audioMusicGain.gain.cancelScheduledValues(now);
     this.audioMusicGain.gain.linearRampToValueAtTime(targetMusicGain, now + 0.12);
@@ -672,11 +889,13 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
-    const bpm = Phaser.Math.Linear(92, 148, Phaser.Math.Clamp(pressure * 0.85 + jamLoad * 0.45, 0, 1));
+    const bpm = Phaser.Math.Linear(100, 164, Phaser.Math.Clamp(pressure * 0.85 + jamLoad * 0.45, 0, 1));
     this.musicBeatMs = 60000 / bpm;
     this.musicBeatTimerMs += deltaMs;
 
-    while (this.musicBeatTimerMs >= this.musicBeatMs) {
+    let beatSafety = 0;
+    while (this.musicBeatTimerMs >= this.musicBeatMs && beatSafety < 10) {
+      beatSafety += 1;
       this.musicBeatTimerMs -= this.musicBeatMs;
       this.triggerMusicBeat(pressure, jamLoad);
     }
@@ -2556,12 +2775,6 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
-    const mainSpeedRange = Math.max(1, this.maxMainSpeed - this.baseMainSpeed);
-    const sideSpeedRange = Math.max(1, this.maxSideSpeed - this.baseSideSpeed);
-    const mainSpeedEnergy = Phaser.Math.Clamp((this.mainSpeed - this.baseMainSpeed) / mainSpeedRange, 0, 1);
-    const sideSpeedEnergy = Phaser.Math.Clamp((this.sideSpeed - this.baseSideSpeed) / sideSpeedRange, 0, 1);
-    const rhythmPulse = Phaser.Math.Clamp(this.rhythmPulseMs / 130, 0, 1);
-
     const jammedByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
       acc[lane.id] = false;
       return acc;
@@ -2577,14 +2790,7 @@ export default class GameScene extends Phaser.Scene {
       this.mainBeltLineConfig.offset = (this.mainBeltLineConfig.offset + this.mainSpeed * dt) % spacing;
       this.mainBeltLines.clear();
       drawConveyorLines(this.mainBeltLines, this.mainBeltLineConfig);
-      this.mainBeltLines.setAlpha(0.58 + mainSpeedEnergy * 0.42 + rhythmPulse * 0.1);
-    }
-
-    if (this.mainBeltBody?.active) {
-      const idleColor = Phaser.Display.Color.ValueToColor(0x1e293b);
-      const hotColor = Phaser.Display.Color.ValueToColor(0x334155);
-      const mixed = Phaser.Display.Color.Interpolate.ColorWithColor(idleColor, hotColor, 100, Math.round(mainSpeedEnergy * 100));
-      this.mainBeltBody.setFillStyle(Phaser.Display.Color.GetColor(mixed.r, mixed.g, mixed.b), 1);
+      this.mainBeltLines.setAlpha(0.74);
     }
 
     for (const lane of Object.values(this.lanesById)) {
@@ -2600,20 +2806,7 @@ export default class GameScene extends Phaser.Scene {
 
       lane.beltLines.clear();
       drawConveyorLines(lane.beltLines, lane.beltLineConfig);
-      const lineAlphaBase = laneJammed ? 0.34 : 0.6;
-      const lineAlphaEnergy = laneJammed ? 0.08 : sideSpeedEnergy * 0.36;
-      lane.beltLines.setAlpha(lineAlphaBase + lineAlphaEnergy + rhythmPulse * (laneJammed ? 0.06 : 0.12));
-
-      if (lane.beltBody?.active) {
-        const idleColor = Phaser.Display.Color.ValueToColor(0x1e293b);
-        const laneColor = Phaser.Display.Color.ValueToColor(laneJammed ? 0x7f1d1d : this.foodTypeById[lane.desiredType]?.color ?? 0x334155);
-        const mixAmount = laneJammed
-          ? Phaser.Math.Clamp(Math.round(34 + rhythmPulse * 20), 0, 100)
-          : Phaser.Math.Clamp(Math.round(sideSpeedEnergy * 26 + rhythmPulse * 16), 0, 100);
-        const mixed = Phaser.Display.Color.Interpolate.ColorWithColor(idleColor, laneColor, 100, mixAmount);
-        lane.beltBody.setFillStyle(Phaser.Display.Color.GetColor(mixed.r, mixed.g, mixed.b), 1);
-      }
-
+      lane.beltLines.setAlpha(laneJammed ? 0.42 : 0.74);
     }
   }
 
@@ -2772,7 +2965,6 @@ export default class GameScene extends Phaser.Scene {
     this.items.push(item);
     this.emitSpawnParticles(item);
     this.emitTransferParticles(this.mainX, this.mainStartY, food.color, 6);
-    this.playSfx('spawn', 0.82 + this.currentPressure * 0.4);
 
     this.nextItemId += 1;
   }
