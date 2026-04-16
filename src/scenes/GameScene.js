@@ -12,6 +12,12 @@ const CLAW_RADIUS = 12;
 const CLAW_CLEARANCE = 2;
 const SIDE_BELT_INTAKE_OFFSET = CLAW_OFFSET_X + CLAW_RADIUS + CLAW_CLEARANCE;
 
+const CLAW_ARM_LENGTH = 22;
+const CLAW_JAW_LENGTH = 12;
+const CLAW_JAW_SPREAD = 10;
+
+const CHEST_PICKUP_BUFFER = 16;
+
 const BELT_LINE_COLOR = 0x0f172a;
 const BELT_LINE_ALPHA = 0.38;
 
@@ -102,7 +108,7 @@ const LANE_LAYOUT = [
     y: 300,
     direction: -1,
     endX: 190,
-    chestX: 130,
+    chestX: 110,
     chestLabel: 'Carbs Chest'
   },
   {
@@ -112,7 +118,7 @@ const LANE_LAYOUT = [
     y: 300,
     direction: 1,
     endX: 1090,
-    chestX: 1150,
+    chestX: 1170,
     chestLabel: 'Protein Chest'
   },
   {
@@ -122,7 +128,7 @@ const LANE_LAYOUT = [
     y: 500,
     direction: -1,
     endX: 190,
-    chestX: 130,
+    chestX: 110,
     chestLabel: 'Greens Chest'
   },
   {
@@ -132,7 +138,7 @@ const LANE_LAYOUT = [
     y: 500,
     direction: 1,
     endX: 1090,
-    chestX: 1150,
+    chestX: 1170,
     chestLabel: 'Condiments Chest'
   }
 ];
@@ -200,6 +206,43 @@ export default class GameScene extends Phaser.Scene {
     this.mainBeltLines = null;
     this.mainBeltLineConfig = null;
 
+    this.cardCatalog = [];
+    this.cardStatusText = null;
+    this.pressureText = null;
+    this.lastPickedCardName = 'None';
+    this.cardPickCount = 0;
+
+    this.currentPressure = 0;
+    this.pressureSampleTimerMs = 0;
+    this.pressureSampleIntervalMs = 500;
+    this.highPressureHoldMs = 0;
+
+    this.cardDraftCooldownMs = 0;
+    this.cardDraftCooldownDurationMs = 18000;
+    this.cardEmergencyThreshold = 0.72;
+    this.cardEmergencyHoldDurationMs = 2000;
+    this.cardPityThreshold = 0.45;
+    this.cardPityDurationMs = 75000;
+    this.timeSinceLastDraftMs = 0;
+    this.cardScoreMilestonePoints = 6000;
+    this.nextCardScoreMilestone = this.cardScoreMilestonePoints;
+    this.pendingScoreDraft = false;
+
+    this.isDraftActive = false;
+    this.activeDraftTrigger = null;
+    this.cardDraftContainer = null;
+    this.cardDraftChoices = [];
+    this.cardDraftEntries = [];
+    this.cardDraftSelectedIndex = 0;
+    this.cardInputKeys = null;
+
+    this.coolantFlushHoldDurationMs = 10000;
+    this.coolantFlushRampDurationMs = 8000;
+    this.coolantFlushHoldMs = 0;
+    this.coolantFlushRampMs = 0;
+    this.smartSortScoreLockDurationMs = 6000;
+    this.smartSortScoreLockMs = 0;
+
     this.foodTypeById = FOOD_TYPES.reduce((acc, food) => {
       acc[food.id] = food;
       return acc;
@@ -228,8 +271,664 @@ export default class GameScene extends Phaser.Scene {
   create() {
     this.createFactoryVisuals();
     this.createScoreUi();
+    this.createCardSystem();
     this.createParticles();
     this.setupGrabControls();
+  }
+
+  createCardSystem() {
+    this.cardCatalog = this.buildCardCatalog();
+
+    this.cardStatusText = this.add
+      .text(18, 70, '', {
+        fontFamily: 'Consolas',
+        fontSize: '16px',
+        color: '#93c5fd'
+      })
+      .setDepth(300)
+      .setShadow(0, 2, '#000000', 8);
+
+    this.pressureText = this.add
+      .text(18, 92, '', {
+        fontFamily: 'Consolas',
+        fontSize: '16px',
+        color: '#fcd34d'
+      })
+      .setDepth(300)
+      .setShadow(0, 2, '#000000', 8);
+
+    if (this.input.keyboard) {
+      this.cardInputKeys = this.input.keyboard.addKeys({
+        left: Phaser.Input.Keyboard.KeyCodes.LEFT,
+        right: Phaser.Input.Keyboard.KeyCodes.RIGHT,
+        a: Phaser.Input.Keyboard.KeyCodes.A,
+        d: Phaser.Input.Keyboard.KeyCodes.D,
+        enter: Phaser.Input.Keyboard.KeyCodes.ENTER,
+        space: Phaser.Input.Keyboard.KeyCodes.SPACE
+      });
+    }
+
+    this.refreshCardHud();
+  }
+
+  buildCardCatalog() {
+    return [
+      {
+        id: 'coolant_flush',
+        name: 'Coolant Flush',
+        archetype: 'rescue',
+        description: 'Reset speeds to base, then ramp back up.',
+        note: 'Live in Phase 2: speed reset + smooth recovery.'
+      },
+      {
+        id: 'smart_sort_protocol',
+        name: 'Smart Sort Protocol',
+        archetype: 'rescue',
+        description: 'Auto-sort active items and clear the main belt.',
+        note: 'Live in Phase 2: emergency reshuffle and breathing room.'
+      },
+      {
+        id: 'inserter_calibration',
+        name: 'Inserter Calibration',
+        archetype: 'control',
+        description: 'Improve transfer lane selection temporarily.',
+        note: 'Effect is planned for Phase 3.'
+      },
+      {
+        id: 'chest_priority_mode',
+        name: 'Chest Priority Mode',
+        archetype: 'control',
+        description: 'Temporarily grant limited chest forgiveness.',
+        note: 'Effect is planned for Phase 3.'
+      },
+      {
+        id: 'turbo_shift',
+        name: 'Turbo Shift',
+        archetype: 'greed',
+        description: 'Higher score gain at higher speed pressure.',
+        note: 'Effect is planned for Phase 4.'
+      },
+      {
+        id: 'combo_furnace',
+        name: 'Combo Furnace',
+        archetype: 'greed',
+        description: 'Boost combo growth with bigger downside risk.',
+        note: 'Effect is planned for Phase 4.'
+      }
+    ];
+  }
+
+  refreshCardHud() {
+    if (this.cardStatusText) {
+      const cardLabel = this.cardPickCount > 0 ? this.lastPickedCardName : 'Ready';
+      const effectLabels = [];
+      if (this.coolantFlushHoldMs > 0) {
+        effectLabels.push(`Coolant ${Math.ceil(this.coolantFlushHoldMs / 1000)}s`);
+      } else if (this.coolantFlushRampMs > 0) {
+        effectLabels.push(`Coolant Ramp ${Math.ceil(this.coolantFlushRampMs / 1000)}s`);
+      }
+      if (this.smartSortScoreLockMs > 0) {
+        effectLabels.push(`No Score ${Math.ceil(this.smartSortScoreLockMs / 1000)}s`);
+      }
+
+      const suffix = effectLabels.length > 0 ? ` | ${effectLabels.join(' | ')}` : '';
+      this.cardStatusText.setText(`CARD ${cardLabel}${suffix}`);
+    }
+
+    if (this.pressureText) {
+      this.pressureText.setText(`PRESSURE ${Math.round(this.currentPressure * 100)}%`);
+    }
+  }
+
+  updateCardEffects(deltaMs) {
+    if (deltaMs <= 0) {
+      return;
+    }
+
+    if (this.coolantFlushHoldMs > 0) {
+      this.coolantFlushHoldMs = Math.max(0, this.coolantFlushHoldMs - deltaMs);
+    } else if (this.coolantFlushRampMs > 0) {
+      this.coolantFlushRampMs = Math.max(0, this.coolantFlushRampMs - deltaMs);
+    }
+
+    if (this.smartSortScoreLockMs > 0) {
+      this.smartSortScoreLockMs = Math.max(0, this.smartSortScoreLockMs - deltaMs);
+    }
+  }
+
+  applyCardEffect(card) {
+    if (!card?.id) {
+      return;
+    }
+
+    if (card.id === 'coolant_flush') {
+      this.activateCoolantFlush();
+      return;
+    }
+
+    if (card.id === 'smart_sort_protocol') {
+      this.activateSmartSortProtocol();
+    }
+  }
+
+  activateCoolantFlush() {
+    this.breakCombo();
+    this.multiplier = 1;
+    this.refreshScoreUi();
+
+    this.coolantFlushHoldMs = this.coolantFlushHoldDurationMs;
+    this.coolantFlushRampMs = this.coolantFlushRampDurationMs;
+  }
+
+  activateSmartSortProtocol() {
+    this.abortActiveDrag();
+    this.smartSortScoreLockMs = this.smartSortScoreLockDurationMs;
+
+    for (const lane of Object.values(this.lanesById)) {
+      if (lane?.clawContainer?.active) {
+        this.tweens.killTweensOf(lane.clawContainer);
+        lane.clawContainer.setAngle(lane.clawBaseAngle ?? 0);
+      }
+      if (lane?.chestClawContainer?.active) {
+        this.tweens.killTweensOf(lane.chestClawContainer);
+        lane.chestClawContainer.setAngle(lane.chestClawBaseAngle ?? 0);
+      }
+    }
+
+    const laneIdByFoodType = LANE_LAYOUT.reduce((acc, lane) => {
+      acc[lane.desiredType] = lane.id;
+      return acc;
+    }, {});
+
+    const laneBuckets = LANE_LAYOUT.reduce((acc, lane) => {
+      acc[lane.id] = [];
+      return acc;
+    }, {});
+
+    for (const item of this.items) {
+      if (!item || item.state === 'consuming') {
+        continue;
+      }
+
+      const destinationLaneId = laneIdByFoodType[item.type];
+      const lane = this.lanesById[destinationLaneId];
+      if (!destinationLaneId || !lane) {
+        continue;
+      }
+
+      this.tweens.killTweensOf(item.container);
+      item.motionLock = false;
+      item.state = 'side';
+      item.laneId = destinationLaneId;
+      item.mainPos = 0;
+      item.holdMainPos = null;
+
+      if (item.container?.active) {
+        item.container.setAlpha(1);
+        item.container.setScale(1);
+        item.container.setAngle(0);
+        item.container.setDepth(10);
+      }
+
+      if (item.grabHandle?.active) {
+        if (!item.grabHandle.input?.enabled) {
+          item.grabHandle.setInteractive({ useHandCursor: true });
+          this.input.setDraggable(item.grabHandle);
+        }
+        item.grabHandle.setDepth(11);
+        if (item.grabHandle.input) {
+          item.grabHandle.input.cursor = 'grab';
+        }
+      }
+
+      this.clearItemTint(item);
+      laneBuckets[destinationLaneId].push(item);
+    }
+
+    for (const laneConfig of LANE_LAYOUT) {
+      const lane = this.lanesById[laneConfig.id];
+      const bucket = laneBuckets[laneConfig.id];
+      if (!lane || !bucket || bucket.length === 0) {
+        continue;
+      }
+
+      bucket.sort((a, b) => a.id - b.id);
+
+      const usableLength = Math.max(1, lane.length);
+      const spacing = bucket.length <= 1 ? 0 : usableLength / (bucket.length - 1);
+
+      bucket.forEach((item, index) => {
+        const lanePos = Phaser.Math.Clamp(spacing * index, 0, lane.length);
+        item.lanePos = lanePos;
+        item.x = lane.intakeX + lane.direction * lanePos;
+        item.y = lane.y;
+
+        if (item.container?.active) {
+          item.container.setPosition(item.x, item.y);
+        }
+        if (item.grabHandle?.active) {
+          item.grabHandle.setPosition(item.x, item.y);
+        }
+      });
+    }
+
+    this.syncItemPositions();
+  }
+
+  calculatePressureSnapshot() {
+    const laneCount = Math.max(1, LANE_LAYOUT.length);
+
+    const mainItemCount = this.items.filter((item) => item.state === 'main' || item.state === 'stopped-main').length;
+    const mainCapacity = Math.max(1, Math.floor(this.mainLength / Math.max(1, this.itemSpacing)));
+    const mainFill = Phaser.Math.Clamp(mainItemCount / mainCapacity, 0, 1);
+
+    const blockedIntakes = LANE_LAYOUT.reduce((count, lane) => count + (this.canEnterLane(lane.id) ? 0 : 1), 0);
+    const intakeBlock = Phaser.Math.Clamp(blockedIntakes / laneCount, 0, 1);
+
+    const jammedCount = this.items.filter((item) => item.state === 'jammed').length;
+    const jamCapacity = laneCount * 3;
+    const jamLoad = Phaser.Math.Clamp(jammedCount / Math.max(1, jamCapacity), 0, 1);
+
+    const mainSpeedStressRange = Math.max(1, this.maxMainSpeed - this.baseMainSpeed);
+    const sideSpeedStressRange = Math.max(1, this.maxSideSpeed - this.baseSideSpeed);
+    const spawnStressRange = Math.max(1, this.baseSpawnIntervalMs - this.minSpawnIntervalMs);
+
+    const mainSpeedStress = Phaser.Math.Clamp((this.mainSpeed - this.baseMainSpeed) / mainSpeedStressRange, 0, 1);
+    const sideSpeedStress = Phaser.Math.Clamp((this.sideSpeed - this.baseSideSpeed) / sideSpeedStressRange, 0, 1);
+    const spawnStress = Phaser.Math.Clamp((this.baseSpawnIntervalMs - this.spawnIntervalMs) / spawnStressRange, 0, 1);
+    const speedStress = Phaser.Math.Clamp((mainSpeedStress + sideSpeedStress + spawnStress) / 3, 0, 1);
+
+    const pressure = Phaser.Math.Clamp(mainFill * 0.35 + intakeBlock * 0.25 + jamLoad * 0.2 + speedStress * 0.2, 0, 1);
+
+    return {
+      pressure,
+      mainFill,
+      intakeBlock,
+      jamLoad,
+      speedStress
+    };
+  }
+
+  updateCardDraftSystem(deltaMs) {
+    if (deltaMs <= 0 || this.isGameOver) {
+      return;
+    }
+
+    this.cardDraftCooldownMs = Math.max(0, this.cardDraftCooldownMs - deltaMs);
+
+    if (!this.isDraftActive) {
+      this.timeSinceLastDraftMs += deltaMs;
+    }
+
+    if (this.cardScoreMilestonePoints > 0) {
+      while (this.score >= this.nextCardScoreMilestone) {
+        this.pendingScoreDraft = true;
+        this.nextCardScoreMilestone += this.cardScoreMilestonePoints;
+      }
+    }
+
+    this.pressureSampleTimerMs += deltaMs;
+    while (this.pressureSampleTimerMs >= this.pressureSampleIntervalMs) {
+      this.pressureSampleTimerMs -= this.pressureSampleIntervalMs;
+
+      const pressureSnapshot = this.calculatePressureSnapshot();
+      this.currentPressure = pressureSnapshot.pressure;
+
+      if (this.currentPressure >= this.cardEmergencyThreshold) {
+        this.highPressureHoldMs += this.pressureSampleIntervalMs;
+      } else {
+        this.highPressureHoldMs = Math.max(0, this.highPressureHoldMs - this.pressureSampleIntervalMs * 0.5);
+      }
+    }
+
+    this.refreshCardHud();
+
+    if (this.isDraftActive || this.dragContext || this.cardDraftCooldownMs > 0) {
+      return;
+    }
+
+    let triggerType = null;
+
+    if (this.highPressureHoldMs >= this.cardEmergencyHoldDurationMs && this.currentPressure >= this.cardEmergencyThreshold) {
+      triggerType = 'emergency';
+    } else if (this.pendingScoreDraft) {
+      triggerType = 'score';
+    } else if (this.timeSinceLastDraftMs >= this.cardPityDurationMs && this.currentPressure >= this.cardPityThreshold) {
+      triggerType = 'pity';
+    }
+
+    if (!triggerType) {
+      return;
+    }
+
+    const opened = this.openCardDraft(triggerType);
+    if (opened && triggerType === 'score') {
+      this.pendingScoreDraft = false;
+    }
+  }
+
+  openCardDraft(triggerType) {
+    if (this.isGameOver || this.isDraftActive) {
+      return false;
+    }
+
+    const choices = this.buildDraftChoices(triggerType);
+    if (choices.length < 3) {
+      return false;
+    }
+
+    this.abortActiveDrag();
+
+    this.isDraftActive = true;
+    this.activeDraftTrigger = triggerType;
+    this.cardDraftChoices = choices;
+    this.cardDraftEntries = [];
+    this.cardDraftSelectedIndex = 0;
+    this.cardDraftCooldownMs = this.cardDraftCooldownDurationMs;
+    this.timeSinceLastDraftMs = 0;
+    this.highPressureHoldMs = 0;
+
+    const container = this.add.container(0, 0).setDepth(360);
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x020617, 0.78).setInteractive();
+    scrim.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+    });
+
+    const panel = this.add.rectangle(640, 360, 1160, 520, 0x0b1220, 0.96).setStrokeStyle(2, 0x334155, 1);
+    const title = this.add
+      .text(640, 148, 'SYSTEM CARD DRAFT', {
+        fontFamily: 'Consolas',
+        fontSize: '34px',
+        color: '#e2e8f0'
+      })
+      .setOrigin(0.5);
+
+    const reasonLabel = this.add
+      .text(640, 188, `Trigger: ${this.formatDraftTrigger(triggerType)} | Pressure ${Math.round(this.currentPressure * 100)}%`, {
+        fontFamily: 'Consolas',
+        fontSize: '18px',
+        color: '#93c5fd'
+      })
+      .setOrigin(0.5);
+
+    const helper = this.add
+      .text(640, 585, 'Choose one card  |  Mouse click or Left/Right + Enter', {
+        fontFamily: 'Consolas',
+        fontSize: '16px',
+        color: '#94a3b8'
+      })
+      .setOrigin(0.5);
+
+    container.add([scrim, panel, title, reasonLabel, helper]);
+
+    const cardWidth = 320;
+    const cardHeight = 300;
+    const gap = 32;
+    const firstX = 640 - cardWidth - gap;
+    const cardY = 360;
+
+    choices.forEach((card, index) => {
+      const cardX = firstX + index * (cardWidth + gap);
+      this.createDraftCardVisual(container, card, cardX, cardY, cardWidth, cardHeight, index);
+    });
+
+    this.cardDraftContainer = container;
+    this.setDraftSelection(0);
+
+    return true;
+  }
+
+  buildDraftChoices(triggerType) {
+    const available = this.cardCatalog.slice();
+    if (available.length < 3) {
+      return [];
+    }
+
+    const selected = [];
+    const selectedIds = new Set();
+
+    const pickFrom = (archetypes) => {
+      const pool = available.filter((card) => archetypes.includes(card.archetype) && !selectedIds.has(card.id));
+      if (pool.length === 0) {
+        return null;
+      }
+
+      return Phaser.Utils.Array.GetRandom(pool);
+    };
+
+    const addCard = (card) => {
+      if (!card || selectedIds.has(card.id)) {
+        return;
+      }
+      selected.push(card);
+      selectedIds.add(card.id);
+    };
+
+    addCard(pickFrom(['rescue', 'control']));
+    addCard(pickFrom(['control', 'greed']));
+
+    const highPressureDraft = triggerType === 'emergency' || this.currentPressure >= 0.75;
+    if (highPressureDraft && !selected.some((card) => card.archetype === 'rescue')) {
+      addCard(pickFrom(['rescue']));
+    }
+
+    while (selected.length < 3) {
+      addCard(pickFrom(['rescue', 'control', 'greed']));
+      if (selected.length >= available.length) {
+        break;
+      }
+    }
+
+    return selected.slice(0, 3);
+  }
+
+  createDraftCardVisual(container, card, x, y, width, height, index) {
+    const archetypeColorById = {
+      rescue: 0x22d3ee,
+      control: 0xf59e0b,
+      greed: 0xef4444
+    };
+
+    const archetypeColor = archetypeColorById[card.archetype] ?? 0x94a3b8;
+
+    const cardBg = this.add
+      .rectangle(x, y, width, height, 0x111827, 0.95)
+      .setStrokeStyle(2, archetypeColor, 1)
+      .setInteractive({ useHandCursor: true });
+
+    const archetype = this.add
+      .text(x, y - 112, card.archetype.toUpperCase(), {
+        fontFamily: 'Consolas',
+        fontSize: '15px',
+        color: '#cbd5e1'
+      })
+      .setOrigin(0.5);
+
+    const name = this.add
+      .text(x, y - 74, card.name, {
+        fontFamily: 'Consolas',
+        fontSize: '24px',
+        color: '#f8fafc',
+        align: 'center',
+        wordWrap: { width: width - 36 }
+      })
+      .setOrigin(0.5);
+
+    const description = this.add
+      .text(x, y - 6, card.description, {
+        fontFamily: 'Consolas',
+        fontSize: '16px',
+        color: '#e2e8f0',
+        align: 'center',
+        wordWrap: { width: width - 34 }
+      })
+      .setOrigin(0.5);
+
+    const note = this.add
+      .text(x, y + 102, card.note, {
+        fontFamily: 'Consolas',
+        fontSize: '14px',
+        color: '#94a3b8',
+        align: 'center',
+        wordWrap: { width: width - 34 }
+      })
+      .setOrigin(0.5);
+
+    cardBg.on('pointerover', () => {
+      this.setDraftSelection(index);
+    });
+
+    cardBg.on('pointerdown', () => {
+      this.pickDraftCard(index);
+    });
+
+    container.add([cardBg, archetype, name, description, note]);
+    this.cardDraftEntries.push({ cardBg, archetypeColor });
+  }
+
+  setDraftSelection(index) {
+    if (!this.isDraftActive || this.cardDraftEntries.length === 0) {
+      return;
+    }
+
+    const entryCount = this.cardDraftEntries.length;
+    this.cardDraftSelectedIndex = Phaser.Math.Wrap(index, 0, entryCount);
+    this.refreshDraftSelection();
+  }
+
+  refreshDraftSelection() {
+    this.cardDraftEntries.forEach((entry, index) => {
+      const selected = index === this.cardDraftSelectedIndex;
+      const strokeColor = selected ? 0xf8fafc : entry.archetypeColor;
+      const fillColor = selected ? 0x1e293b : 0x111827;
+
+      entry.cardBg.setFillStyle(fillColor, 0.95);
+      entry.cardBg.setStrokeStyle(selected ? 4 : 2, strokeColor, 1);
+      entry.cardBg.setScale(selected ? 1.02 : 1);
+    });
+  }
+
+  updateDraftInput() {
+    if (!this.isDraftActive || !this.cardInputKeys) {
+      return;
+    }
+
+    const leftPressed =
+      Phaser.Input.Keyboard.JustDown(this.cardInputKeys.left) ||
+      Phaser.Input.Keyboard.JustDown(this.cardInputKeys.a);
+    if (leftPressed) {
+      this.setDraftSelection(this.cardDraftSelectedIndex - 1);
+      return;
+    }
+
+    const rightPressed =
+      Phaser.Input.Keyboard.JustDown(this.cardInputKeys.right) ||
+      Phaser.Input.Keyboard.JustDown(this.cardInputKeys.d);
+    if (rightPressed) {
+      this.setDraftSelection(this.cardDraftSelectedIndex + 1);
+      return;
+    }
+
+    const confirmPressed =
+      Phaser.Input.Keyboard.JustDown(this.cardInputKeys.enter) ||
+      Phaser.Input.Keyboard.JustDown(this.cardInputKeys.space);
+    if (confirmPressed) {
+      this.pickDraftCard(this.cardDraftSelectedIndex);
+    }
+  }
+
+  pickDraftCard(index) {
+    if (!this.isDraftActive) {
+      return;
+    }
+
+    const chosenCard = this.cardDraftChoices[index];
+    if (!chosenCard) {
+      return;
+    }
+
+    this.applyCardEffect(chosenCard);
+
+    this.lastPickedCardName = chosenCard.name;
+    this.cardPickCount += 1;
+
+    const pickToast = this.add
+      .text(640, 128, `${chosenCard.name} selected`, {
+        fontFamily: 'Consolas',
+        fontSize: '24px',
+        color: '#e2e8f0'
+      })
+      .setDepth(320)
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 8);
+
+    this.tweens.add({
+      targets: pickToast,
+      y: 106,
+      alpha: 0,
+      duration: 900,
+      ease: 'Quad.Out',
+      onComplete: () => {
+        pickToast.destroy();
+      }
+    });
+
+    this.closeCardDraft();
+    this.refreshCardHud();
+  }
+
+  closeCardDraft() {
+    if (this.cardDraftContainer?.active) {
+      this.cardDraftContainer.destroy(true);
+    }
+
+    this.cardDraftContainer = null;
+    this.cardDraftChoices = [];
+    this.cardDraftEntries = [];
+    this.cardDraftSelectedIndex = 0;
+    this.activeDraftTrigger = null;
+    this.isDraftActive = false;
+  }
+
+  formatDraftTrigger(triggerType) {
+    if (triggerType === 'emergency') {
+      return 'Emergency';
+    }
+    if (triggerType === 'score') {
+      return 'Score Milestone';
+    }
+    if (triggerType === 'pity') {
+      return 'Pity Timer';
+    }
+
+    return 'Unknown';
+  }
+
+  abortActiveDrag() {
+    if (!this.dragContext) {
+      return;
+    }
+
+    const draggedItem = this.getItemById(this.dragContext.itemId);
+    if (draggedItem) {
+      draggedItem.motionLock = false;
+      this.applyItemSlot(draggedItem, this.dragContext.fromSlot);
+      const destination = this.getWorldPositionForSlot(this.dragContext.fromSlot);
+      draggedItem.x = destination.x;
+      draggedItem.y = destination.y;
+      draggedItem.container.setPosition(destination.x, destination.y);
+      draggedItem.container.setScale(1);
+      draggedItem.container.setAngle(0);
+      draggedItem.container.setDepth(10);
+      draggedItem.grabHandle.setPosition(destination.x, destination.y);
+      draggedItem.grabHandle.setDepth(11);
+      if (draggedItem.grabHandle?.input) {
+        draggedItem.grabHandle.input.cursor = 'grab';
+      }
+    }
+
+    this.dragContext = null;
+    this.setSlowMotion(false);
   }
 
   createParticles() {
@@ -319,6 +1018,11 @@ export default class GameScene extends Phaser.Scene {
   }
 
   handleComboConsume() {
+    if (this.smartSortScoreLockMs > 0) {
+      this.bumpUiText(this.scoreText, 1.04, 70);
+      return;
+    }
+
     const basePoints = 100;
     this.score += basePoints * this.multiplier;
     this.multiplier = Math.min(this.multiplier + 1, this.maxMultiplier);
@@ -351,9 +1055,15 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
+    if (this.isDraftActive) {
+      this.updateDraftInput();
+      return;
+    }
+
     const scaledDeltaMs = delta * this.simTimeScale;
     const dt = scaledDeltaMs / 1000;
 
+    this.updateCardEffects(scaledDeltaMs);
     this.updateDifficulty();
 
     this.spawnBlockedThisFrame = false;
@@ -380,6 +1090,7 @@ export default class GameScene extends Phaser.Scene {
     this.syncItemPositions();
 
     this.checkForGameOver(dt);
+    this.updateCardDraftSystem(delta);
   }
 
   checkForGameOver(dt) {
@@ -419,24 +1130,9 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.isGameOver = true;
+    this.closeCardDraft();
     this.setSlowMotion(false);
-
-    if (this.dragContext) {
-      const draggedItem = this.getItemById(this.dragContext.itemId);
-      if (draggedItem) {
-        draggedItem.motionLock = false;
-        this.applyItemSlot(draggedItem, this.dragContext.fromSlot);
-        const destination = this.getWorldPositionForSlot(this.dragContext.fromSlot);
-        draggedItem.x = destination.x;
-        draggedItem.y = destination.y;
-        draggedItem.container.setPosition(destination.x, destination.y);
-        draggedItem.container.setScale(1);
-        draggedItem.container.setAngle(0);
-        draggedItem.grabHandle.setPosition(destination.x, destination.y);
-      }
-
-      this.dragContext = null;
-    }
+    this.abortActiveDrag();
 
     this.input.enabled = false;
 
@@ -511,6 +1207,21 @@ export default class GameScene extends Phaser.Scene {
         this.add.rectangle(laneConfig.chestX, laneConfig.y, 114, 56, 0x334155, 1).setStrokeStyle(3, laneColor, 1);
       }
 
+      // Add chest inserter claw
+      const chestClawX = laneConfig.endX + laneConfig.direction * 18;
+      const chestClawContainer = this.add.container(chestClawX, laneConfig.y).setDepth(10);
+      // Chest inserter should face the belt (toward the center) at rest.
+      const chestClawBaseAngle = laneConfig.direction > 0 ? 0 : 180;
+      chestClawContainer.setAngle(chestClawBaseAngle);
+      const chestClawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x0f172a, 1).setStrokeStyle(2, laneColor, 1);
+      const chestClawGraphics = this.add.graphics();
+      chestClawGraphics.lineStyle(4, 0x94a3b8, 1);
+      chestClawGraphics.lineBetween(0, 0, -CLAW_ARM_LENGTH, 0);
+      chestClawGraphics.lineStyle(4, laneColor, 1);
+      chestClawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, -CLAW_JAW_SPREAD);
+      chestClawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, CLAW_JAW_SPREAD);
+      chestClawContainer.add([chestClawGraphics, chestClawBase]);
+
       this.add
         .text(laneConfig.chestX, laneConfig.y + 56, laneConfig.label, {
           fontFamily: 'Consolas',
@@ -522,15 +1233,32 @@ export default class GameScene extends Phaser.Scene {
         .setShadow(0, 2, '#000000', 8);
 
       const clawX = this.mainX + laneConfig.direction * CLAW_OFFSET_X;
-      const clawMarker = this.add.circle(clawX, laneConfig.y, CLAW_RADIUS, 0x94a3b8, 1).setStrokeStyle(2, laneColor, 1);
+
+      const clawBaseAngle = laneConfig.direction > 0 ? 0 : 180;
+      const clawContainer = this.add.container(clawX, laneConfig.y).setDepth(9);
+      clawContainer.setAngle(clawBaseAngle);
+
+      const clawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x0f172a, 1).setStrokeStyle(2, laneColor, 1);
+      const clawGraphics = this.add.graphics();
+      clawGraphics.lineStyle(4, 0x94a3b8, 1);
+      clawGraphics.lineBetween(0, 0, -CLAW_ARM_LENGTH, 0);
+      clawGraphics.lineStyle(4, laneColor, 1);
+      clawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, -CLAW_JAW_SPREAD);
+      clawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, CLAW_JAW_SPREAD);
+
+      clawContainer.add([clawGraphics, clawBase]);
 
       this.lanesById[laneConfig.id] = {
         ...laneConfig,
         intakeX,
-        length: laneWidth,
+        length: Math.max(0, laneWidth - CHEST_PICKUP_BUFFER),
         beltLines,
         beltLineConfig,
-        clawMarker,
+        clawContainer,
+        clawBaseAngle,
+        clawArmLength: CLAW_ARM_LENGTH,
+        chestClawContainer,
+        chestClawBaseAngle,
         chestSprite,
         chestBaseScale,
         chestAnimToken: 0
@@ -569,9 +1297,32 @@ export default class GameScene extends Phaser.Scene {
     const targetSideSpeed = this.baseSideSpeed + steps * this.sideSpeedPerStep;
     const targetSpawnIntervalMs = this.baseSpawnIntervalMs - steps * this.spawnIntervalDecreasePerStepMs;
 
-    this.mainSpeed = Phaser.Math.Clamp(targetMainSpeed, this.baseMainSpeed, this.maxMainSpeed);
-    this.sideSpeed = Phaser.Math.Clamp(targetSideSpeed, this.baseSideSpeed, this.maxSideSpeed);
-    this.spawnIntervalMs = Phaser.Math.Clamp(targetSpawnIntervalMs, this.minSpawnIntervalMs, this.baseSpawnIntervalMs);
+    const clampedMainTarget = Phaser.Math.Clamp(targetMainSpeed, this.baseMainSpeed, this.maxMainSpeed);
+    const clampedSideTarget = Phaser.Math.Clamp(targetSideSpeed, this.baseSideSpeed, this.maxSideSpeed);
+    const clampedSpawnTarget = Phaser.Math.Clamp(targetSpawnIntervalMs, this.minSpawnIntervalMs, this.baseSpawnIntervalMs);
+
+    if (this.coolantFlushHoldMs > 0) {
+      this.mainSpeed = this.baseMainSpeed;
+      this.sideSpeed = this.baseSideSpeed;
+      this.spawnIntervalMs = this.baseSpawnIntervalMs;
+      return;
+    }
+
+    if (this.coolantFlushRampMs > 0) {
+      const rampProgress = Phaser.Math.Clamp(
+        1 - this.coolantFlushRampMs / Math.max(1, this.coolantFlushRampDurationMs),
+        0,
+        1
+      );
+      this.mainSpeed = Phaser.Math.Linear(this.baseMainSpeed, clampedMainTarget, rampProgress);
+      this.sideSpeed = Phaser.Math.Linear(this.baseSideSpeed, clampedSideTarget, rampProgress);
+      this.spawnIntervalMs = Phaser.Math.Linear(this.baseSpawnIntervalMs, clampedSpawnTarget, rampProgress);
+      return;
+    }
+
+    this.mainSpeed = clampedMainTarget;
+    this.sideSpeed = clampedSideTarget;
+    this.spawnIntervalMs = clampedSpawnTarget;
   }
 
   spawnFoodIfSpace() {
@@ -830,13 +1581,17 @@ export default class GameScene extends Phaser.Scene {
   }
 
   handleDragStart(_pointer, gameObject) {
+    if (this.isDraftActive) {
+      return;
+    }
+
     if (this.dragContext) {
       return;
     }
 
     const itemId = gameObject.getData('itemId');
     const item = this.getItemById(itemId);
-    if (!item || item.state === 'consuming') {
+    if (!item || item.state === 'consuming' || item.motionLock) {
       return;
     }
 
@@ -1248,7 +2003,6 @@ export default class GameScene extends Phaser.Scene {
     const destinationX = lane.intakeX;
     const destinationY = lane.y;
 
-    item.holdMainPos = null;
     item.state = 'side';
     item.laneId = laneId;
     item.lanePos = 0;
@@ -1261,36 +2015,124 @@ export default class GameScene extends Phaser.Scene {
     item.grabHandle.setPosition(startX, startY);
 
     this.tweens.killTweensOf(item.container);
-    this.tweens.add({
+
+    const claw = lane.clawContainer;
+    if (!claw) {
+      const fallbackTween = this.tweens.add({
+        targets: item.container,
+        x: destinationX,
+        y: destinationY,
+        angle: lane.direction * 10,
+        duration: 140,
+        ease: 'Sine.Out',
+        onUpdate: () => {
+          item.x = item.container.x;
+          item.y = item.container.y;
+          item.grabHandle.setPosition(item.x, item.y);
+        },
+        onComplete: () => {
+          item.motionLock = false;
+          item.container.setAngle(0);
+          item.container.setScale(1);
+          item.x = destinationX;
+          item.y = destinationY;
+          item.container.setPosition(destinationX, destinationY);
+          item.grabHandle.setPosition(destinationX, destinationY);
+        }
+      });
+      fallbackTween.timeScale = this.simTimeScale;
+      return;
+    }
+
+    const baseAngle = typeof lane.clawBaseAngle === 'number' ? lane.clawBaseAngle : lane.direction > 0 ? 0 : 180;
+    const targetAngle = baseAngle + lane.direction * 180;
+    const armLength = typeof lane.clawArmLength === 'number' ? lane.clawArmLength : CLAW_ARM_LENGTH;
+
+    const speedFactorRaw = this.baseMainSpeed > 0 ? this.mainSpeed / this.baseMainSpeed : 1;
+    const speedFactor = Phaser.Math.Clamp(speedFactorRaw, 0.75, 3.25);
+
+    const pickDuration = Phaser.Math.Clamp(70 / speedFactor, 28, 70);
+    const rotateDuration = Phaser.Math.Clamp(210 / speedFactor, 80, 210);
+    const dropDuration = Phaser.Math.Clamp(80 / speedFactor, 28, 80);
+    const returnDuration = Phaser.Math.Clamp(180 / speedFactor, 70, 180);
+
+    const holdLength = armLength + CLAW_JAW_LENGTH * 0.75;
+
+    const getHandWorldAtAngle = (angleDeg) => {
+      const theta = Phaser.Math.DegToRad(angleDeg);
+      return {
+        x: claw.x + Math.cos(theta) * -holdLength,
+        y: claw.y + Math.sin(theta) * -holdLength
+      };
+    };
+
+    const syncToContainer = () => {
+      item.x = item.container.x;
+      item.y = item.container.y;
+      item.grabHandle.setPosition(item.x, item.y);
+    };
+
+    const placeAtHand = () => {
+      const hand = getHandWorldAtAngle(claw.angle);
+      item.x = hand.x;
+      item.y = hand.y;
+      item.container.setPosition(hand.x, hand.y);
+      item.grabHandle.setPosition(hand.x, hand.y);
+    };
+
+    this.tweens.killTweensOf(claw);
+    claw.setAngle(baseAngle);
+
+    const handStart = getHandWorldAtAngle(baseAngle);
+
+    const pickTween = this.tweens.add({
       targets: item.container,
-      x: destinationX,
-      y: destinationY,
-      angle: lane.direction * 10,
-      duration: 140,
+      x: handStart.x,
+      y: handStart.y,
+      duration: pickDuration,
       ease: 'Sine.Out',
-      onUpdate: () => {
-        item.x = item.container.x;
-        item.y = item.container.y;
-        item.grabHandle.setPosition(item.x, item.y);
-      },
+      onUpdate: syncToContainer,
       onComplete: () => {
-        item.motionLock = false;
-        item.container.setAngle(0);
-        item.container.setScale(1);
-        item.x = destinationX;
-        item.y = destinationY;
-        item.container.setPosition(destinationX, destinationY);
-        item.grabHandle.setPosition(destinationX, destinationY);
+        const rotateTween = this.tweens.add({
+          targets: claw,
+          angle: targetAngle,
+          duration: rotateDuration,
+          ease: 'Sine.InOut',
+          onUpdate: placeAtHand,
+          onComplete: () => {
+            const dropTween = this.tweens.add({
+              targets: item.container,
+              x: destinationX,
+              y: destinationY,
+              angle: lane.direction * 8,
+              duration: dropDuration,
+              ease: 'Sine.Out',
+              onUpdate: syncToContainer,
+              onComplete: () => {
+                item.motionLock = false;
+                item.container.setAngle(0);
+                item.container.setScale(1);
+                item.x = destinationX;
+                item.y = destinationY;
+                item.container.setPosition(destinationX, destinationY);
+                item.grabHandle.setPosition(destinationX, destinationY);
+
+                const resetTween = this.tweens.add({
+                  targets: claw,
+                  angle: baseAngle,
+                  duration: returnDuration,
+                  ease: 'Sine.InOut'
+                });
+                resetTween.timeScale = this.simTimeScale;
+              }
+            });
+            dropTween.timeScale = this.simTimeScale;
+          }
+        });
+        rotateTween.timeScale = this.simTimeScale;
       }
     });
-
-    lane.clawMarker.setScale(1.28);
-    this.tweens.add({
-      targets: lane.clawMarker,
-      scale: 1,
-      duration: 120,
-      ease: 'Quad.Out'
-    });
+    pickTween.timeScale = this.simTimeScale;
   }
 
   updateSideBelts(dt) {
@@ -1317,9 +2159,83 @@ export default class GameScene extends Phaser.Scene {
             item.lanePos = lane.length;
 
             if (item.type === lane.desiredType) {
-              this.acceptedCount += 1;
-              this.handleComboConsume();
-              this.startChestIntake(item, lane);
+              // Animate chest inserter claw
+              if (!item.motionLock && lane.chestClawContainer) {
+                item.motionLock = true;
+                const claw = lane.chestClawContainer;
+                const baseAngle = typeof lane.chestClawBaseAngle === 'number' ? lane.chestClawBaseAngle : (lane.direction > 0 ? 0 : 180);
+                const targetAngle = baseAngle + lane.direction * 180;
+                const armLength = typeof lane.clawArmLength === 'number' ? lane.clawArmLength : CLAW_ARM_LENGTH;
+
+                const speedFactorRaw = this.baseSideSpeed > 0 ? this.sideSpeed / this.baseSideSpeed : 1;
+                const speedFactor = Phaser.Math.Clamp(speedFactorRaw, 0.75, 3.25);
+                const pickDuration = Phaser.Math.Clamp(70 / speedFactor, 28, 70);
+                const rotateDuration = Phaser.Math.Clamp(210 / speedFactor, 80, 210);
+                const dropDuration = Phaser.Math.Clamp(80 / speedFactor, 28, 80);
+                const returnDuration = Phaser.Math.Clamp(180 / speedFactor, 70, 180);
+
+                const holdLength = armLength + CLAW_JAW_LENGTH * 0.75;
+
+                const getHandWorldAtAngle = (angleDeg) => {
+                  const theta = Phaser.Math.DegToRad(angleDeg);
+                  return {
+                    x: claw.x + Math.cos(theta) * -holdLength,
+                    y: claw.y + Math.sin(theta) * -holdLength
+                  };
+                };
+
+                const syncToContainer = () => {
+                  item.x = item.container.x;
+                  item.y = item.container.y;
+                  item.grabHandle.setPosition(item.x, item.y);
+                };
+
+                const placeAtHand = () => {
+                  const hand = getHandWorldAtAngle(claw.angle);
+                  item.x = hand.x;
+                  item.y = hand.y;
+                  item.container.setPosition(hand.x, hand.y);
+                  item.grabHandle.setPosition(hand.x, hand.y);
+                };
+
+                this.tweens.killTweensOf(claw);
+                claw.setAngle(baseAngle);
+
+                const handStart = getHandWorldAtAngle(baseAngle);
+
+                const pickTween = this.tweens.add({
+                  targets: item.container,
+                  x: handStart.x,
+                  y: handStart.y,
+                  duration: pickDuration,
+                  ease: 'Sine.Out',
+                  onUpdate: syncToContainer,
+                  onComplete: () => {
+                    const rotateTween = this.tweens.add({
+                      targets: claw,
+                      angle: targetAngle,
+                      duration: rotateDuration,
+                      ease: 'Sine.InOut',
+                      onUpdate: placeAtHand,
+                      onComplete: () => {
+                        // Remove item and play chest animation
+                        this.acceptedCount += 1;
+                        this.handleComboConsume();
+                        this.startChestIntake(item, lane);
+                        const resetTween = this.tweens.add({
+                          targets: claw,
+                          angle: baseAngle,
+                          duration: returnDuration,
+                          ease: 'Sine.InOut'
+                        });
+                        resetTween.timeScale = this.simTimeScale;
+                      }
+                    });
+                    rotateTween.timeScale = this.simTimeScale;
+                  }
+                });
+                pickTween.timeScale = this.simTimeScale;
+              }
             } else {
               item.state = 'jammed';
               this.rejectedCount += 1;
