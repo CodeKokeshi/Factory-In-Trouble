@@ -6,6 +6,6 @@ export default class BootScene extends Phaser.Scene {
   }
 
   create() {
-    this.scene.start('LevelSelectScene');
+    this.scene.start('MainMenuScene');
   }
 }

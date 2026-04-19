@@ -1,5 +1,12 @@
 :root {
   color-scheme: dark;
+  --bg-ink: #030915;
+  --bg-deep: #07162a;
+  --bg-steel: #12365a;
+  --bg-warm: #7c3d1f;
+  --text-ui: #d6e6ff;
+  --font-display: 'Bebas Neue', 'Segoe UI', sans-serif;
+  --font-ui: 'Rajdhani', 'Segoe UI', sans-serif;
 }
 
 * {
@@ -12,13 +19,38 @@ body {
   padding: 0;
   width: 100%;
   height: 100%;
-  background: radial-gradient(circle at 20% 20%, #1f2937 0%, #0f172a 40%, #020617 100%);
-  font-family: "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at 14% 18%, color-mix(in srgb, var(--bg-steel) 66%, transparent) 0 26%, transparent 62%),
+    radial-gradient(circle at 88% 82%, color-mix(in srgb, var(--bg-warm) 42%, transparent) 0 28%, transparent 64%),
+    linear-gradient(164deg, var(--bg-deep) 0%, var(--bg-ink) 44%, #020611 100%);
+  color: var(--text-ui);
+  font-family: var(--font-ui);
+  overflow: hidden;
 }
 
 body {
   display: grid;
   place-items: center;
+}
+
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+body::before {
+  background-image:
+    linear-gradient(to right, rgba(125, 211, 252, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(125, 211, 252, 0.05) 1px, transparent 1px);
+  background-size: 96px 96px;
+  opacity: 0.14;
+}
+
+body::after {
+  background: radial-gradient(circle at center, transparent 40%, rgba(2, 6, 18, 0.5) 100%);
 }
 
 #game-container {
@@ -28,4 +60,13 @@ body {
 
 canvas {
   display: block;
+  outline: none;
+  border: none;
+}
+
+canvas:focus,
+canvas:focus-visible {
+  outline: none;
+  border: none;
+  box-shadow: none;
 }

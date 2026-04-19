@@ -275,6 +275,72 @@ const CAMPAIGN_LEVELS = [
       baseIntervalMs: 610,
       minIntervalMs: 265
     }
+  },
+  {
+    id: 'L13',
+    index: 13,
+    mode: 'campaign',
+    title: 'Level 13 - Tri-Core Conveyor',
+    subtitle: 'Triangle Mesh / No Main Belt',
+    quota: 650,
+    layoutFamily: 'triangle_mesh',
+    mainFlowDirection: 'down',
+    foods: ['condiments', 'carbs', 'protein', 'greens'],
+    activeLaneIds: ['mid_left', 'mid_right', 'bot_left', 'bot_right'],
+    chestMapping: {
+      mid_left: 'protein',
+      mid_right: 'carbs',
+      bot_left: 'condiments',
+      bot_right: 'greens'
+    },
+    spawn: {
+      baseIntervalMs: 590,
+      minIntervalMs: 255
+    }
+  },
+  {
+    id: 'L14',
+    index: 14,
+    mode: 'campaign',
+    title: 'Level 14 - Dual Spine Disorder',
+    subtitle: 'Dual Spine / Split Feed',
+    quota: 700,
+    layoutFamily: 'dual_spine',
+    mainFlowDirection: 'down',
+    foods: ['condiments', 'carbs', 'protein', 'greens'],
+    activeLaneIds: ['mid_left', 'mid_right', 'bot_left', 'bot_right'],
+    chestMapping: {
+      mid_left: 'greens',
+      mid_right: 'protein',
+      bot_left: 'carbs',
+      bot_right: 'condiments'
+    },
+    spawn: {
+      baseIntervalMs: 570,
+      minIntervalMs: 245
+    }
+  },
+  {
+    id: 'L15',
+    index: 15,
+    mode: 'campaign',
+    title: 'Level 15 - P Reactor',
+    subtitle: 'P Shape / One-Way Pressure',
+    quota: 780,
+    layoutFamily: 'p_shape',
+    mainFlowDirection: 'down',
+    foods: ['condiments', 'carbs', 'protein', 'greens'],
+    activeLaneIds: ['mid_left', 'mid_right', 'bot_left', 'bot_right'],
+    chestMapping: {
+      mid_left: 'carbs',
+      mid_right: 'protein',
+      bot_left: 'greens',
+      bot_right: 'condiments'
+    },
+    spawn: {
+      baseIntervalMs: 550,
+      minIntervalMs: 235
+    }
   }
 ];
 

@@ -1,7 +1,10 @@
 import Phaser from 'phaser';
 import { DEFAULT_LEVEL_ID, getLevelById, getNextCampaignLevelId } from '../data/levels';
+import { markCampaignLevelCompleted } from '../data/campaignProgress';
+import assemblyLineShuffleUrl from '../../assets/audio/music/The_Assembly_Line_Shuffle.mp3';
+import bannersOverPeakUrl from '../../assets/audio/music/Banners_Over_the_Peak.mp3';
 
-const MAX_SPRITES_PER_TYPE = 24;
+const MAX_GAMEPLAY_SPRITES_PER_TYPE = 24;
 const FOOD_RENDER_SIZE = 42;
 
 const MAIN_BELT_WIDTH = 56;
@@ -19,11 +22,23 @@ const CLAW_JAW_SPREAD = 10;
 
 const CHEST_PICKUP_BUFFER = 16;
 const STANDARD_CHEST_OFFSET_X = 80;
+const CHEST_BUBBLE_SWAP_INTERVAL_MS = 900;
+const CHEST_BUBBLE_ICON_SIZE = 28;
 const SPACING_RULE_LEVEL_START = 6;
 const SPACING_RULE_LEVEL_END = 12;
 
 const BELT_LINE_COLOR = 0x0f172a;
 const BELT_LINE_ALPHA = 0.38;
+
+const ASSEMBLY_LINE_SHUFFLE_SEGMENTS = Object.freeze({
+  introStartSec: 0,
+  introEndSec: 12,
+  loopStartSec: 13,
+  loopEndSec: 21
+});
+
+const GAME_DISPLAY_FONT = "'Lilita One', 'Bebas Neue', 'Segoe UI', sans-serif";
+const GAME_UI_FONT = "'Nunito', 'Rajdhani', 'Segoe UI', sans-serif";
 
 function drawConveyorLines(graphics, { x, y, width, height, orientation, spacing, margin = 6, offset = 0 }) {
   const left = x - width * 0.5 + margin;
@@ -66,12 +81,17 @@ function findFirstMatchUrl(spriteGlob, matcher) {
 const CHEST_CLOSED_URL = findFirstMatchUrl(CHEST_SPRITE_GLOB, /closed\.png$/i);
 const CHEST_OPENED_URL = findFirstMatchUrl(CHEST_SPRITE_GLOB, /opened\.png$/i);
 
-function collectSpriteUrls(spriteGlob, maxCount = MAX_SPRITES_PER_TYPE) {
+function collectSpriteUrls(spriteGlob, maxCount = MAX_GAMEPLAY_SPRITES_PER_TYPE) {
   return Object.entries(spriteGlob)
     .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
     .slice(0, maxCount)
     .map(([, url]) => url);
 }
+
+const CHEST_BUBBLE_SPRITE_URLS_BY_FOOD_ID = Object.entries(SPRITE_URL_GLOBS).reduce((acc, [foodId, spriteGlob]) => {
+  acc[foodId] = collectSpriteUrls(spriteGlob, Number.POSITIVE_INFINITY);
+  return acc;
+}, {});
 
 const FOOD_TYPES = [
   {
@@ -79,28 +99,28 @@ const FOOD_TYPES = [
     label: 'Condiments',
     short: 'Cm',
     color: 0xf97316,
-    spriteUrls: collectSpriteUrls(SPRITE_URL_GLOBS.condiments)
+    spriteUrls: collectSpriteUrls(SPRITE_URL_GLOBS.condiments, MAX_GAMEPLAY_SPRITES_PER_TYPE)
   },
   {
     id: 'carbs',
     label: 'Carbs',
     short: 'Cb',
     color: 0xeab308,
-    spriteUrls: collectSpriteUrls(SPRITE_URL_GLOBS.carbs)
+    spriteUrls: collectSpriteUrls(SPRITE_URL_GLOBS.carbs, MAX_GAMEPLAY_SPRITES_PER_TYPE)
   },
   {
     id: 'protein',
     label: 'Protein',
     short: 'Pr',
     color: 0xef4444,
-    spriteUrls: collectSpriteUrls(SPRITE_URL_GLOBS.protein)
+    spriteUrls: collectSpriteUrls(SPRITE_URL_GLOBS.protein, MAX_GAMEPLAY_SPRITES_PER_TYPE)
   },
   {
     id: 'greens',
     label: 'Greens',
     short: 'Gr',
     color: 0x22c55e,
-    spriteUrls: collectSpriteUrls(SPRITE_URL_GLOBS.greens)
+    spriteUrls: collectSpriteUrls(SPRITE_URL_GLOBS.greens, MAX_GAMEPLAY_SPRITES_PER_TYPE)
   }
 ];
 
@@ -147,8 +167,11 @@ const BASE_LANE_LAYOUT = [
   }
 ];
 
+const DEFAULT_MAIN_X = 640;
 const DEFAULT_MAIN_START_Y = 72;
 const DEFAULT_MAIN_END_Y = 640;
+const SIDE_BELT_MIN_LENGTH = Math.abs((DEFAULT_MAIN_X - SIDE_BELT_INTAKE_OFFSET) - BASE_LANE_LAYOUT[0].endX);
+const SIDE_BELT_MAX_LENGTH = MAIN_BELT_HEIGHT;
 
 function cloneBaseLaneLayout() {
   return BASE_LANE_LAYOUT.map((lane) => ({ ...lane }));
@@ -162,7 +185,7 @@ export default class GameScene extends Phaser.Scene {
   constructor() {
     super('GameScene');
 
-    this.mainX = 640;
+    this.mainX = DEFAULT_MAIN_X;
     this.mainStartY = DEFAULT_MAIN_START_Y;
     this.mainEndY = DEFAULT_MAIN_END_Y;
     this.mainFlowSign = 1;
@@ -224,6 +247,7 @@ export default class GameScene extends Phaser.Scene {
     this.clawRows = [];
     this.activeFoodTypes = [...FOOD_TYPES];
     this.textureKeysByFoodId = {};
+    this.chestBubbleTextureKeysByFoodId = {};
 
     this.acceptedCount = 0;
     this.rejectedCount = 0;
@@ -271,11 +295,29 @@ export default class GameScene extends Phaser.Scene {
     this.audioCompressor = null;
     this.audioMasterTone = null;
     this.audioNoiseBuffer = null;
+    this.musicReactiveLayerEnabled = false;
     this.musicBeatTimerMs = 0;
     this.musicBeatMs = 60000 / 96;
     this.musicStepIndex = 0;
     this.musicComboRisePulseMs = 0;
     this.musicComboDropPulseMs = 0;
+    this.bgmUrl = assemblyLineShuffleUrl;
+    this.bgmSegments = { ...ASSEMBLY_LINE_SHUFFLE_SEGMENTS };
+    this.bgmBuffer = null;
+    this.bgmLoadPromise = null;
+    this.bgmMonoWave = null;
+    this.bgmResolvedSegments = null;
+    this.bgmSourceNode = null;
+    this.bgmGainNode = null;
+    this.bgmPlaybackState = 'idle';
+    this.bgmSessionToken = 0;
+    this.levelClearMusicActive = false;
+    this.victoryMusicUrl = bannersOverPeakUrl;
+    this.victoryMusicBuffer = null;
+    this.victoryMusicLoadPromise = null;
+    this.victoryMusicSourceNode = null;
+    this.victoryMusicGainNode = null;
+    this.victoryMusicPlaybackState = 'idle';
     this.lastDraftSelectSfxMs = 0;
     this.lastRumbleAtMs = 0;
 
@@ -431,6 +473,8 @@ export default class GameScene extends Phaser.Scene {
       this.laneLayout = this.enforceCampaignSpacing(this.laneLayout);
     }
 
+    this.laneLayout = this.enforceSideBeltLengthBounds(this.laneLayout);
+
     this.clawRows = this.buildClawRowsFromLaneLayout(this.laneLayout);
 
     const activeFoodIds = Array.isArray(levelConfig?.foods) && levelConfig.foods.length > 0
@@ -462,7 +506,8 @@ export default class GameScene extends Phaser.Scene {
   }
 
   applyLayoutFamilyBehavior(layoutFamily) {
-    this.directLaneSpawn = layoutFamily === 'v_swap';
+    const noMainBeltFamilies = new Set(['v_swap', 'triangle_mesh', 'dual_spine']);
+    this.directLaneSpawn = noMainBeltFamilies.has(layoutFamily);
     this.layoutUsesMainBelt = !this.directLaneSpawn;
     this.showTransferClaws = this.layoutUsesMainBelt;
   }
@@ -486,6 +531,43 @@ export default class GameScene extends Phaser.Scene {
       intakeX: this.mainX + lane.direction * SIDE_BELT_INTAKE_OFFSET,
       chestX: lane.endX + lane.direction * STANDARD_CHEST_OFFSET_X
     }));
+  }
+
+  enforceSideBeltLengthBounds(laneLayout) {
+    if (!Array.isArray(laneLayout)) {
+      return [];
+    }
+
+    return laneLayout.map((lane) => {
+      const direction = lane.direction >= 0 ? 1 : -1;
+      const fallbackIntakeX = this.mainX + direction * SIDE_BELT_INTAKE_OFFSET;
+      const intakeX = Number.isFinite(lane.intakeX) ? lane.intakeX : fallbackIntakeX;
+      const endX = Number.isFinite(lane.endX) ? lane.endX : intakeX + direction * SIDE_BELT_MIN_LENGTH;
+      const beltLength = Math.abs(intakeX - endX);
+      const boundedLength = Phaser.Math.Clamp(beltLength, SIDE_BELT_MIN_LENGTH, SIDE_BELT_MAX_LENGTH);
+
+      if (Math.abs(boundedLength - beltLength) < 0.001) {
+        return lane;
+      }
+
+      if (this.layoutUsesMainBelt) {
+        const chestOffset = Number.isFinite(lane.chestX)
+          ? lane.chestX - endX
+          : direction * STANDARD_CHEST_OFFSET_X;
+        const nextEndX = intakeX + direction * boundedLength;
+
+        return {
+          ...lane,
+          endX: nextEndX,
+          chestX: nextEndX + chestOffset
+        };
+      }
+
+      return {
+        ...lane,
+        intakeX: endX - direction * boundedLength
+      };
+    });
   }
 
   applyLayoutFamilyPreset(laneLayout, layoutFamily) {
@@ -613,6 +695,102 @@ export default class GameScene extends Phaser.Scene {
       return laneLayout;
     }
 
+    if (layoutFamily === 'triangle_mesh') {
+      patchLane('mid_left', {
+        y: 210,
+        direction: -1,
+        intakeX: this.mainX - 8,
+        endX: 220,
+        chestX: 110
+      });
+      patchLane('mid_right', {
+        y: 210,
+        direction: 1,
+        intakeX: this.mainX + 8,
+        endX: 1060,
+        chestX: 1170
+      });
+      patchLane('bot_left', {
+        y: 390,
+        direction: -1,
+        intakeX: 560,
+        endX: 210,
+        chestX: 110
+      });
+      patchLane('bot_right', {
+        y: 560,
+        direction: 1,
+        intakeX: 720,
+        endX: 1070,
+        chestX: 1170
+      });
+      return laneLayout;
+    }
+
+    if (layoutFamily === 'dual_spine') {
+      patchLane('mid_left', {
+        y: 220,
+        direction: -1,
+        intakeX: 460,
+        endX: 190,
+        chestX: 110
+      });
+      patchLane('bot_left', {
+        y: 500,
+        direction: -1,
+        intakeX: 480,
+        endX: 210,
+        chestX: 110
+      });
+      patchLane('mid_right', {
+        y: 300,
+        direction: 1,
+        intakeX: 820,
+        endX: 1070,
+        chestX: 1170
+      });
+      patchLane('bot_right', {
+        y: 580,
+        direction: 1,
+        intakeX: 800,
+        endX: 1050,
+        chestX: 1170
+      });
+      return laneLayout;
+    }
+
+    if (layoutFamily === 'p_shape') {
+      patchLane('mid_left', {
+        y: 220,
+        direction: 1,
+        intakeX: this.mainX + SIDE_BELT_INTAKE_OFFSET,
+        endX: 980,
+        chestX: 1090
+      });
+      patchLane('mid_right', {
+        y: 330,
+        direction: 1,
+        intakeX: this.mainX + SIDE_BELT_INTAKE_OFFSET,
+        endX: 1080,
+        chestX: 1170
+      });
+      patchLane('bot_right', {
+        y: 450,
+        direction: 1,
+        intakeX: this.mainX + SIDE_BELT_INTAKE_OFFSET,
+        endX: 1020,
+        chestX: 1130
+      });
+      patchLane('bot_left', {
+        y: 560,
+        direction: -1,
+        intakeX: this.mainX - SIDE_BELT_INTAKE_OFFSET,
+        endX: 210,
+        chestX: 110
+      });
+      return laneLayout;
+    }
+
     if (layoutFamily === 'v_swap') {
       patchLane('mid_left', { y: 290, direction: -1, intakeX: this.mainX, endX: 210, chestX: 110 });
       patchLane('mid_right', { y: 460, direction: 1, intakeX: this.mainX, endX: 1070, chestX: 1170 });
@@ -714,6 +892,12 @@ export default class GameScene extends Phaser.Scene {
     this.musicComboRisePulseMs = 0;
     this.musicComboDropPulseMs = 0;
     this.musicBeatTimerMs = 0;
+    this.stopBgmSource();
+    this.bgmPlaybackState = 'idle';
+    this.stopVictoryMusicSource();
+    this.victoryMusicPlaybackState = 'idle';
+    this.levelClearMusicActive = false;
+    this.bgmSessionToken += 1;
 
     this.resetChestPriorityCharges();
   }
@@ -734,6 +918,8 @@ export default class GameScene extends Phaser.Scene {
       this.load.image(CHEST_OPENED_KEY, CHEST_OPENED_URL);
     }
 
+    const textureKeyByUrl = new Map();
+
     FOOD_TYPES.forEach((food) => {
       this.textureKeysByFoodId[food.id] = [];
 
@@ -741,6 +927,24 @@ export default class GameScene extends Phaser.Scene {
         const textureKey = `food_${food.id}_${index}`;
         this.load.image(textureKey, url);
         this.textureKeysByFoodId[food.id].push(textureKey);
+        textureKeyByUrl.set(url, textureKey);
+      });
+    });
+
+    Object.entries(CHEST_BUBBLE_SPRITE_URLS_BY_FOOD_ID).forEach(([foodId, spriteUrls]) => {
+      this.chestBubbleTextureKeysByFoodId[foodId] = [];
+
+      spriteUrls.forEach((url, index) => {
+        const existingKey = textureKeyByUrl.get(url);
+        if (existingKey) {
+          this.chestBubbleTextureKeysByFoodId[foodId].push(existingKey);
+          return;
+        }
+
+        const textureKey = `food_chest_bubble_${foodId}_${index}`;
+        this.load.image(textureKey, url);
+        this.chestBubbleTextureKeysByFoodId[foodId].push(textureKey);
+        textureKeyByUrl.set(url, textureKey);
       });
     });
   }
@@ -753,16 +957,19 @@ export default class GameScene extends Phaser.Scene {
     this.createCardSystem();
     this.createParticles();
     this.setupGrabControls();
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.handleSceneShutdown, this);
+    this.events.once(Phaser.Scenes.Events.DESTROY, this.handleSceneShutdown, this);
   }
 
   createSceneJuiceLayer() {
     this.fxTimeMs = 0;
 
-    const leftGlow = this.add.circle(236, 126, 250, 0x1d4ed8, 0.12).setDepth(-20);
+    const leftGlow = this.add.circle(236, 126, 250, 0xf59e0b, 0.14).setDepth(-20);
     leftGlow.setBlendMode(Phaser.BlendModes.ADD);
-    const rightGlow = this.add.circle(1040, 608, 280, 0x22d3ee, 0.11).setDepth(-20);
+    const rightGlow = this.add.circle(1040, 608, 280, 0xfb7185, 0.12).setDepth(-20);
     rightGlow.setBlendMode(Phaser.BlendModes.ADD);
-    const centerGlow = this.add.circle(640, 358, 330, 0xf59e0b, 0.07).setDepth(-19);
+    const centerGlow = this.add.circle(640, 358, 330, 0x34d399, 0.08).setDepth(-19);
     centerGlow.setBlendMode(Phaser.BlendModes.ADD);
 
     this.ambientGlow = {
@@ -804,7 +1011,7 @@ export default class GameScene extends Phaser.Scene {
       ease: 'Sine.InOut'
     });
 
-    this.moodVignette = this.add.rectangle(640, 360, 1280, 720, 0x020617, 0.15).setDepth(250);
+    this.moodVignette = this.add.rectangle(640, 360, 1280, 720, 0x1a0b06, 0.16).setDepth(250);
 
     this.flashOverlay = this.add.rectangle(640, 360, 1280, 720, 0xffffff, 1).setDepth(340).setAlpha(0);
     this.flashOverlay.setBlendMode(Phaser.BlendModes.ADD);
@@ -836,9 +1043,9 @@ export default class GameScene extends Phaser.Scene {
       this.audioCompressor.release.setValueAtTime(0.18, ctx.currentTime);
     }
 
-    this.audioMasterGain.gain.value = 1.22;
-    this.audioMusicGain.gain.value = 0.32;
-    this.audioSfxGain.gain.value = 1.95;
+    this.audioMasterGain.gain.value = 1.08;
+    this.audioMusicGain.gain.value = 0.95;
+    this.audioSfxGain.gain.value = 0.9;
 
     this.audioMusicGain.connect(this.audioMasterGain);
     this.audioSfxGain.connect(this.audioMasterGain);
@@ -853,6 +1060,29 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.audioNoiseBuffer = this.createNoiseBuffer();
+
+    this.stopBgmSource();
+    if (this.bgmGainNode) {
+      this.bgmGainNode.disconnect();
+    }
+    this.bgmGainNode = ctx.createGain();
+    this.bgmGainNode.gain.value = 0.0001;
+    this.bgmGainNode.connect(this.audioMusicGain);
+
+    this.stopVictoryMusicSource();
+    if (this.victoryMusicGainNode) {
+      this.victoryMusicGainNode.disconnect();
+    }
+    this.victoryMusicGainNode = ctx.createGain();
+    this.victoryMusicGainNode.gain.value = 0.0001;
+    this.victoryMusicGainNode.connect(this.audioMusicGain);
+
+    this.bgmPlaybackState = 'idle';
+    this.victoryMusicPlaybackState = 'idle';
+    this.levelClearMusicActive = false;
+    this.bgmSessionToken += 1;
+    this.loadBgmBuffer();
+    this.loadVictoryMusicBuffer();
 
     this.audioEnabled = true;
     this.audioUnlocked = ctx.state === 'running';
@@ -892,6 +1122,7 @@ export default class GameScene extends Phaser.Scene {
       this.input.off('pointerdown', this.unlockAudioContext, this);
       this.input.keyboard?.off('keydown', this.unlockAudioContext, this);
       this.input.gamepad?.off('down', this.unlockAudioContext, this);
+      this.ensureBgmPlayback();
 
       // Play a short, obvious confirmation burst after unlock.
       this.playDrumHit('kick', 1.15, 'sfx');
@@ -912,6 +1143,694 @@ export default class GameScene extends Phaser.Scene {
       }
     } catch {
       // Keep listeners active for the next interaction attempt.
+    }
+  }
+
+  handleSceneShutdown() {
+    this.stopBgmSource();
+    this.bgmPlaybackState = 'idle';
+    this.stopVictoryMusicSource();
+    this.victoryMusicPlaybackState = 'idle';
+    this.levelClearMusicActive = false;
+    this.bgmSessionToken += 1;
+
+    if (this.bgmGainNode) {
+      this.bgmGainNode.disconnect();
+      this.bgmGainNode = null;
+    }
+
+    if (this.victoryMusicGainNode) {
+      this.victoryMusicGainNode.disconnect();
+      this.victoryMusicGainNode = null;
+    }
+
+    this.input.off('pointerdown', this.unlockAudioContext, this);
+    this.input.keyboard?.off('keydown', this.unlockAudioContext, this);
+    this.input.gamepad?.off('down', this.unlockAudioContext, this);
+  }
+
+  loadBgmBuffer() {
+    if (!this.audioCtx || !this.bgmUrl) {
+      return Promise.resolve(null);
+    }
+
+    if (this.bgmBuffer) {
+      if (!this.bgmResolvedSegments) {
+        const baseSegments = this.resolveBgmSegments(this.bgmBuffer.duration);
+        this.bgmResolvedSegments = this.refineBgmLoopSeam(this.bgmBuffer, baseSegments);
+      }
+      return Promise.resolve(this.bgmBuffer);
+    }
+
+    if (this.bgmLoadPromise) {
+      return this.bgmLoadPromise;
+    }
+
+    this.bgmLoadPromise = fetch(this.bgmUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`BGM fetch failed with status ${response.status}`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((arrayBuffer) => {
+        if (!this.audioCtx) {
+          return null;
+        }
+
+        if (this.audioCtx.decodeAudioData.length <= 1) {
+          return this.audioCtx.decodeAudioData(arrayBuffer.slice(0));
+        }
+
+        return new Promise((resolve, reject) => {
+          this.audioCtx.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+        });
+      })
+      .then((buffer) => {
+        if (!buffer) {
+          return null;
+        }
+
+        this.bgmBuffer = buffer;
+        this.bgmMonoWave = null;
+        const baseSegments = this.resolveBgmSegments(buffer.duration);
+        this.bgmResolvedSegments = this.refineBgmLoopSeam(buffer, baseSegments);
+        return buffer;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.bgmLoadPromise = null;
+      });
+
+    return this.bgmLoadPromise;
+  }
+
+  loadVictoryMusicBuffer() {
+    if (!this.audioCtx || !this.victoryMusicUrl) {
+      return Promise.resolve(null);
+    }
+
+    if (this.victoryMusicBuffer) {
+      return Promise.resolve(this.victoryMusicBuffer);
+    }
+
+    if (this.victoryMusicLoadPromise) {
+      return this.victoryMusicLoadPromise;
+    }
+
+    this.victoryMusicLoadPromise = fetch(this.victoryMusicUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Victory music fetch failed with status ${response.status}`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((arrayBuffer) => {
+        if (!this.audioCtx) {
+          return null;
+        }
+
+        if (this.audioCtx.decodeAudioData.length <= 1) {
+          return this.audioCtx.decodeAudioData(arrayBuffer.slice(0));
+        }
+
+        return new Promise((resolve, reject) => {
+          this.audioCtx.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+        });
+      })
+      .then((buffer) => {
+        if (!buffer) {
+          return null;
+        }
+
+        this.victoryMusicBuffer = buffer;
+        return buffer;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.victoryMusicLoadPromise = null;
+      });
+
+    return this.victoryMusicLoadPromise;
+  }
+
+  resolveBgmSegments(trackDurationSec) {
+    const duration = Math.max(0.2, Number(trackDurationSec) || 0.2);
+
+    const introStartSec = Phaser.Math.Clamp(
+      Number(this.bgmSegments?.introStartSec) || 0,
+      0,
+      Math.max(0, duration - 0.05)
+    );
+    const introEndTarget = Number(this.bgmSegments?.introEndSec) || introStartSec + 0.1;
+    const introEndSec = Phaser.Math.Clamp(
+      Math.max(introStartSec + 0.05, introEndTarget),
+      introStartSec + 0.05,
+      duration
+    );
+
+    const loopStartSec = Phaser.Math.Clamp(
+      Number(this.bgmSegments?.loopStartSec) || introStartSec,
+      0,
+      Math.max(0, duration - 0.05)
+    );
+    const loopEndTarget = Number(this.bgmSegments?.loopEndSec) || duration;
+    const loopEndSec = Phaser.Math.Clamp(
+      Math.max(loopStartSec + 0.05, loopEndTarget),
+      loopStartSec + 0.05,
+      duration
+    );
+
+    const introEndSafe = Phaser.Math.Clamp(
+      Math.max(introEndSec, loopStartSec),
+      introStartSec + 0.05,
+      duration
+    );
+
+    return {
+      introStartSec,
+      introEndSec: introEndSafe,
+      loopStartSec,
+      loopEndSec
+    };
+  }
+
+  getBgmMonoWave(buffer) {
+    if (!buffer || typeof buffer.getChannelData !== 'function') {
+      return null;
+    }
+
+    if (this.bgmMonoWave?.bufferRef === buffer && this.bgmMonoWave?.data) {
+      return this.bgmMonoWave.data;
+    }
+
+    const mono = buffer.getChannelData(0);
+    this.bgmMonoWave = {
+      bufferRef: buffer,
+      data: mono
+    };
+
+    return mono;
+  }
+
+  snapToZeroCrossing(sampleData, targetIndex, radiusSamples = 80) {
+    if (!sampleData || sampleData.length < 3) {
+      return targetIndex;
+    }
+
+    const minIndex = Math.max(1, targetIndex - radiusSamples);
+    const maxIndex = Math.min(sampleData.length - 2, targetIndex + radiusSamples);
+
+    let bestIndex = Phaser.Math.Clamp(targetIndex, minIndex, maxIndex);
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    for (let i = minIndex; i <= maxIndex; i += 1) {
+      const prev = sampleData[i - 1];
+      const curr = sampleData[i];
+      const next = sampleData[i + 1];
+      const hasCrossing = (prev <= 0 && curr >= 0) || (prev >= 0 && curr <= 0);
+      const amplitude = Math.abs(curr);
+      const slope = Math.abs(next - prev);
+      const distancePenalty = Math.abs(i - targetIndex) * 0.00001;
+      const score = amplitude + slope * 0.06 + distancePenalty - (hasCrossing ? 0.002 : 0);
+
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+
+    return bestIndex;
+  }
+
+  refineBgmLoopSeam(buffer, segments) {
+    if (!buffer || !segments) {
+      return segments;
+    }
+
+    const mono = this.getBgmMonoWave(buffer);
+    const sampleRate = buffer.sampleRate || 44100;
+    if (!mono || mono.length < sampleRate) {
+      return segments;
+    }
+
+    const desiredDurationSec = Phaser.Math.Clamp(
+      segments.loopEndSec - segments.loopStartSec,
+      0.5,
+      Math.max(0.5, buffer.duration - 0.1)
+    );
+    const desiredDurationSamples = Math.floor(desiredDurationSec * sampleRate);
+
+    const startCenter = Math.floor(segments.loopStartSec * sampleRate);
+    const endCenter = Math.floor(segments.loopEndSec * sampleRate);
+
+    const globalRadiusSamples = Math.max(240, Math.floor(sampleRate * 1.15));
+    const endRefineRadiusSamples = Math.max(120, Math.floor(sampleRate * 0.32));
+    const stepSamples = Math.max(96, Math.floor(sampleRate * 0.008));
+    const seamWindowSamples = Phaser.Math.Clamp(Math.floor(sampleRate * 0.075), 1200, 4600);
+    const analysisStride = 6;
+
+    const loopStartMin = Math.max(seamWindowSamples + 2, startCenter - globalRadiusSamples);
+    const loopStartMax = Math.min(mono.length - seamWindowSamples - 4, startCenter + globalRadiusSamples);
+
+    if (loopStartMax <= loopStartMin) {
+      return segments;
+    }
+
+    let bestScore = Number.POSITIVE_INFINITY;
+    let bestStartIndex = startCenter;
+    let bestEndIndex = endCenter;
+
+    for (let startIndex = loopStartMin; startIndex <= loopStartMax; startIndex += stepSamples) {
+      const expectedEnd = startIndex + desiredDurationSamples;
+      const endMin = Math.max(
+        startIndex + seamWindowSamples + 4,
+        expectedEnd - endRefineRadiusSamples,
+        endCenter - globalRadiusSamples
+      );
+      const endMax = Math.min(
+        mono.length - 3,
+        expectedEnd + endRefineRadiusSamples,
+        endCenter + globalRadiusSamples
+      );
+
+      if (endMax <= endMin) {
+        continue;
+      }
+
+      for (let endIndex = endMin; endIndex <= endMax; endIndex += stepSamples) {
+        const endWindowStart = endIndex - seamWindowSamples;
+        if (endWindowStart < 1 || startIndex + seamWindowSamples + 1 >= mono.length) {
+          continue;
+        }
+
+        let waveDiff = 0;
+        let slopeDiff = 0;
+        let sampleCount = 0;
+
+        for (let offset = 0; offset < seamWindowSamples; offset += analysisStride) {
+          const endSampleIndex = endWindowStart + offset;
+          const startSampleIndex = startIndex + offset;
+
+          const endSample = mono[endSampleIndex];
+          const startSample = mono[startSampleIndex];
+          waveDiff += Math.abs(endSample - startSample);
+
+          const endSlope = endSample - mono[endSampleIndex - 1];
+          const startSlope = startSample - mono[startSampleIndex - 1];
+          slopeDiff += Math.abs(endSlope - startSlope);
+          sampleCount += 1;
+        }
+
+        if (sampleCount <= 0) {
+          continue;
+        }
+
+        const edgeJump = Math.abs(mono[endIndex - 1] - mono[startIndex]);
+        const seamCost = (waveDiff / sampleCount) + (slopeDiff / sampleCount) * 0.42 + edgeJump * 0.68;
+
+        const startPenaltySec = Math.abs(startIndex - startCenter) / sampleRate;
+        const endPenaltySec = Math.abs(endIndex - endCenter) / sampleRate;
+        const durationPenaltySec = Math.abs((endIndex - startIndex) - desiredDurationSamples) / sampleRate;
+        const score = seamCost + (startPenaltySec + endPenaltySec) * 0.014 + durationPenaltySec * 0.055;
+
+        if (score < bestScore) {
+          bestScore = score;
+          bestStartIndex = startIndex;
+          bestEndIndex = endIndex;
+        }
+      }
+    }
+
+    if (!Number.isFinite(bestScore)) {
+      return segments;
+    }
+
+    const snapRadiusSamples = Math.max(20, Math.floor(sampleRate * 0.0023));
+    let snappedStartIndex = this.snapToZeroCrossing(mono, bestStartIndex, snapRadiusSamples);
+    let snappedEndIndex = this.snapToZeroCrossing(mono, bestEndIndex, snapRadiusSamples);
+
+    if (snappedEndIndex <= snappedStartIndex + Math.floor(sampleRate * 0.45)) {
+      snappedStartIndex = bestStartIndex;
+      snappedEndIndex = bestEndIndex;
+    }
+
+    const refinedLoopStartSec = Phaser.Math.Clamp(
+      snappedStartIndex / sampleRate,
+      0,
+      Math.max(0, buffer.duration - 0.05)
+    );
+    const refinedLoopEndSec = Phaser.Math.Clamp(
+      snappedEndIndex / sampleRate,
+      refinedLoopStartSec + 0.05,
+      buffer.duration
+    );
+    const refinedIntroEndSec = Phaser.Math.Clamp(
+      Math.max(segments.introEndSec, refinedLoopStartSec),
+      segments.introStartSec + 0.05,
+      buffer.duration
+    );
+
+    return {
+      ...segments,
+      introEndSec: refinedIntroEndSec,
+      loopStartSec: refinedLoopStartSec,
+      loopEndSec: refinedLoopEndSec
+    };
+  }
+
+  ensureBgmPlayback() {
+    if (!this.audioEnabled || !this.audioUnlocked || !this.audioCtx || !this.bgmGainNode || this.isGameOver || this.levelClearMusicActive) {
+      return;
+    }
+
+    if (this.bgmPlaybackState !== 'idle') {
+      return;
+    }
+
+    this.bgmPlaybackState = 'loading';
+    const sessionToken = this.bgmSessionToken;
+
+    this.loadBgmBuffer()
+      .then((buffer) => {
+        if (!buffer || sessionToken !== this.bgmSessionToken || !this.audioUnlocked || !this.bgmGainNode) {
+          if (this.bgmPlaybackState === 'loading') {
+            this.bgmPlaybackState = 'idle';
+          }
+          return;
+        }
+
+        const segments = this.bgmResolvedSegments || this.refineBgmLoopSeam(buffer, this.resolveBgmSegments(buffer.duration));
+        this.bgmResolvedSegments = segments;
+        const introDuration = segments.introEndSec - segments.introStartSec;
+        if (introDuration <= 0.06) {
+          this.startBgmLoopSegment(segments, sessionToken);
+          return;
+        }
+
+        this.playBgmIntroSegment(segments, sessionToken);
+      })
+      .catch(() => {
+        if (this.bgmPlaybackState === 'loading') {
+          this.bgmPlaybackState = 'idle';
+        }
+      });
+  }
+
+  playBgmIntroSegment(segments, sessionToken) {
+    if (!this.audioCtx || !this.bgmBuffer || !this.bgmGainNode || sessionToken !== this.bgmSessionToken) {
+      this.bgmPlaybackState = 'idle';
+      return;
+    }
+
+    this.stopBgmSource();
+
+    const source = this.audioCtx.createBufferSource();
+    source.buffer = this.bgmBuffer;
+    source.loop = false;
+    source.connect(this.bgmGainNode);
+
+    this.bgmSourceNode = source;
+    this.bgmPlaybackState = 'intro';
+
+    source.onended = () => {
+      if (this.bgmSourceNode === source) {
+        this.bgmSourceNode = null;
+      }
+      source.disconnect();
+
+      if (sessionToken !== this.bgmSessionToken || !this.audioCtx || !this.bgmBuffer || !this.bgmGainNode) {
+        this.bgmPlaybackState = 'idle';
+        return;
+      }
+
+      this.startBgmLoopSegment(segments, sessionToken);
+    };
+
+    try {
+      const introDuration = Math.max(0.05, segments.introEndSec - segments.introStartSec);
+      source.start(this.audioCtx.currentTime + 0.01, segments.introStartSec, introDuration);
+    } catch {
+      this.bgmPlaybackState = 'idle';
+      source.onended = null;
+      source.disconnect();
+      if (this.bgmSourceNode === source) {
+        this.bgmSourceNode = null;
+      }
+    }
+  }
+
+  startBgmLoopSegment(segments, sessionToken) {
+    if (!this.audioCtx || !this.bgmBuffer || !this.bgmGainNode || sessionToken !== this.bgmSessionToken) {
+      this.bgmPlaybackState = 'idle';
+      return;
+    }
+
+    this.stopBgmSource();
+
+    const source = this.audioCtx.createBufferSource();
+    source.buffer = this.bgmBuffer;
+    source.loop = true;
+    source.loopStart = segments.loopStartSec;
+    source.loopEnd = segments.loopEndSec;
+    source.connect(this.bgmGainNode);
+
+    this.bgmSourceNode = source;
+    this.bgmPlaybackState = 'loop';
+
+    source.onended = () => {
+      if (this.bgmSourceNode === source) {
+        this.bgmSourceNode = null;
+      }
+      source.disconnect();
+      if (this.bgmPlaybackState === 'loop') {
+        this.bgmPlaybackState = 'idle';
+      }
+    };
+
+    try {
+      source.start(this.audioCtx.currentTime + 0.01, segments.loopStartSec);
+    } catch {
+      this.bgmPlaybackState = 'idle';
+      source.onended = null;
+      source.disconnect();
+      if (this.bgmSourceNode === source) {
+        this.bgmSourceNode = null;
+      }
+    }
+  }
+
+  stopBgmSource() {
+    if (!this.bgmSourceNode) {
+      return;
+    }
+
+    const activeSource = this.bgmSourceNode;
+    this.bgmSourceNode = null;
+    activeSource.onended = null;
+
+    try {
+      activeSource.stop(0);
+    } catch {
+      // Source may already be stopped.
+    }
+
+    try {
+      activeSource.disconnect();
+    } catch {
+      // Source may already be disconnected.
+    }
+  }
+
+  stopVictoryMusicSource() {
+    if (!this.victoryMusicSourceNode) {
+      return;
+    }
+
+    const activeSource = this.victoryMusicSourceNode;
+    this.victoryMusicSourceNode = null;
+    activeSource.onended = null;
+
+    try {
+      activeSource.stop(0);
+    } catch {
+      // Source may already be stopped.
+    }
+
+    try {
+      activeSource.disconnect();
+    } catch {
+      // Source may already be disconnected.
+    }
+  }
+
+  fadeOutAssemblyMusicFast(durationSec = 0.22) {
+    if (!this.audioCtx || !this.bgmGainNode) {
+      this.stopBgmSource();
+      this.bgmPlaybackState = 'idle';
+      return;
+    }
+
+    const fadeDuration = Phaser.Math.Clamp(durationSec, 0.05, 1.2);
+    const now = this.audioCtx.currentTime;
+    const currentGain = Math.max(0.0001, this.bgmGainNode.gain.value);
+    this.bgmGainNode.gain.cancelScheduledValues(now);
+    this.bgmGainNode.gain.setValueAtTime(currentGain, now);
+    this.bgmGainNode.gain.exponentialRampToValueAtTime(0.0001, now + fadeDuration);
+
+    this.time.delayedCall(Math.round(fadeDuration * 1000) + 24, () => {
+      this.stopBgmSource();
+      this.bgmPlaybackState = 'idle';
+    });
+  }
+
+  fadeOutVictoryMusicFast(durationSec = 0.18, stopAfterFade = true) {
+    if (!this.audioCtx || !this.victoryMusicGainNode) {
+      if (stopAfterFade) {
+        this.stopVictoryMusicSource();
+        this.victoryMusicPlaybackState = 'idle';
+      }
+      return;
+    }
+
+    const fadeDuration = Phaser.Math.Clamp(durationSec, 0.05, 1.2);
+    const now = this.audioCtx.currentTime;
+    const currentGain = Math.max(0.0001, this.victoryMusicGainNode.gain.value);
+    this.victoryMusicGainNode.gain.cancelScheduledValues(now);
+    this.victoryMusicGainNode.gain.setValueAtTime(currentGain, now);
+    this.victoryMusicGainNode.gain.exponentialRampToValueAtTime(0.0001, now + fadeDuration);
+
+    if (stopAfterFade) {
+      this.time.delayedCall(Math.round(fadeDuration * 1000) + 24, () => {
+        this.stopVictoryMusicSource();
+        this.victoryMusicPlaybackState = 'idle';
+      });
+    }
+  }
+
+  playVictoryMusicDuringLevelClear() {
+    if (!this.audioEnabled || !this.audioUnlocked || !this.audioCtx || !this.victoryMusicGainNode) {
+      return;
+    }
+
+    if (this.victoryMusicPlaybackState !== 'idle') {
+      return;
+    }
+
+    this.victoryMusicPlaybackState = 'loading';
+    const sessionToken = this.bgmSessionToken;
+
+    this.loadVictoryMusicBuffer()
+      .then((buffer) => {
+        if (
+          !buffer
+          || sessionToken !== this.bgmSessionToken
+          || !this.levelClearMusicActive
+          || !this.audioUnlocked
+          || !this.victoryMusicGainNode
+        ) {
+          if (this.victoryMusicPlaybackState === 'loading') {
+            this.victoryMusicPlaybackState = 'idle';
+          }
+          return;
+        }
+
+        this.stopVictoryMusicSource();
+
+        const source = this.audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.loop = true;
+        source.connect(this.victoryMusicGainNode);
+
+        const now = this.audioCtx.currentTime;
+        this.victoryMusicGainNode.gain.cancelScheduledValues(now);
+        this.victoryMusicGainNode.gain.setValueAtTime(0.0001, now);
+        this.victoryMusicGainNode.gain.exponentialRampToValueAtTime(0.95, now + 0.14);
+
+        this.victoryMusicSourceNode = source;
+        this.victoryMusicPlaybackState = 'playing';
+
+        source.onended = () => {
+          if (this.victoryMusicSourceNode === source) {
+            this.victoryMusicSourceNode = null;
+          }
+          source.disconnect();
+          if (this.victoryMusicPlaybackState === 'playing') {
+            this.victoryMusicPlaybackState = 'idle';
+          }
+        };
+
+        try {
+          source.start(now + 0.01, 0);
+        } catch {
+          this.victoryMusicPlaybackState = 'idle';
+          source.onended = null;
+          source.disconnect();
+          if (this.victoryMusicSourceNode === source) {
+            this.victoryMusicSourceNode = null;
+          }
+        }
+      })
+      .catch(() => {
+        if (this.victoryMusicPlaybackState === 'loading') {
+          this.victoryMusicPlaybackState = 'idle';
+        }
+      });
+  }
+
+  startLevelClearMusicTransition() {
+    this.levelClearMusicActive = true;
+    this.fadeOutAssemblyMusicFast(0.22);
+
+    this.time.delayedCall(240, () => {
+      if (!this.levelClearMusicActive || this.isGameOver) {
+        return;
+      }
+
+      this.playVictoryMusicDuringLevelClear();
+    });
+  }
+
+  updateAdaptiveBgm({ now, pressure, jamLoad, comboEnergy, comboRise, comboDrop }) {
+    if (!this.bgmGainNode || !this.audioCtx) {
+      return;
+    }
+
+    if (this.levelClearMusicActive) {
+      const currentGain = Math.max(0.0001, this.bgmGainNode.gain.value);
+      this.bgmGainNode.gain.cancelScheduledValues(now);
+      this.bgmGainNode.gain.setValueAtTime(currentGain, now);
+      this.bgmGainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+      return;
+    }
+
+    const speedRange = Math.max(1, this.maxMainSpeed - this.baseMainSpeed);
+    const speedPressure = Phaser.Math.Clamp((this.mainSpeed - this.baseMainSpeed) / speedRange, 0, 1);
+    const intensity = Phaser.Math.Clamp(
+      pressure * 0.44
+      + jamLoad * 0.22
+      + comboEnergy * 0.24
+      + speedPressure * 0.24
+      + comboRise * 0.14
+      - comboDrop * 0.1,
+      0,
+      1
+    );
+
+    const targetBgmGain = this.audioUnlocked && !this.isGameOver
+      ? (this.isDraftActive ? 0.62 : Phaser.Math.Linear(0.95, 1.35, intensity))
+      : 0.001;
+
+    this.bgmGainNode.gain.cancelScheduledValues(now);
+    this.bgmGainNode.gain.linearRampToValueAtTime(targetBgmGain, now + 0.16);
+
+    if (this.bgmSourceNode?.playbackRate) {
+      const targetRate = this.audioUnlocked && !this.isGameOver
+        ? (this.isDraftActive ? 0.98 : Phaser.Math.Linear(0.985, 1.085, intensity))
+        : 0.95;
+
+      this.bgmSourceNode.playbackRate.cancelScheduledValues(now);
+      this.bgmSourceNode.playbackRate.linearRampToValueAtTime(targetRate, now + 0.18);
     }
   }
 
@@ -1409,7 +2328,7 @@ export default class GameScene extends Phaser.Scene {
     const comboDrop = Phaser.Math.Clamp(this.musicComboDropPulseMs / 420, 0, 1);
     const now = this.audioCtx.currentTime;
 
-    const targetMaster = this.isGameOver ? 0.74 : 1.18;
+    const targetMaster = this.isGameOver ? 0.74 : 1.08;
     this.audioMasterGain.gain.cancelScheduledValues(now);
     this.audioMasterGain.gain.linearRampToValueAtTime(targetMaster, now + 0.12);
 
@@ -1422,20 +2341,23 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const targetSfxGain = this.audioUnlocked && !this.isGameOver
-      ? 1.82 + pressure * 0.42
-      : 1.55;
+      ? 0.78 + pressure * 0.24
+      : 0.72;
     this.audioSfxGain.gain.cancelScheduledValues(now);
     this.audioSfxGain.gain.linearRampToValueAtTime(targetSfxGain, now + 0.12);
 
     const targetMusicGain = this.audioUnlocked && !this.isGameOver
       ? (this.isDraftActive
-        ? 0.36
-        : Phaser.Math.Clamp(0.48 + pressure * 0.44 + jamLoad * 0.28 + comboEnergy * 0.36 + comboRise * 0.16 - comboDrop * 0.14, 0.32, 1.44))
+        ? 0.72
+        : Phaser.Math.Clamp(0.96 + pressure * 0.24 + jamLoad * 0.16 + comboEnergy * 0.2 + comboRise * 0.08 - comboDrop * 0.06, 0.82, 1.45))
       : 0.001;
     this.audioMusicGain.gain.cancelScheduledValues(now);
     this.audioMusicGain.gain.linearRampToValueAtTime(targetMusicGain, now + 0.12);
 
-    if (!this.audioUnlocked || this.isGameOver) {
+    this.ensureBgmPlayback();
+    this.updateAdaptiveBgm({ now, pressure, jamLoad, comboEnergy, comboRise, comboDrop });
+
+    if (!this.audioUnlocked || this.isGameOver || !this.musicReactiveLayerEnabled) {
       return;
     }
 
@@ -1514,13 +2436,20 @@ export default class GameScene extends Phaser.Scene {
   createCardSystem() {
     this.cardCatalog = this.buildCardCatalog();
 
+    this.add
+      .rectangle(182, 130, 334, 36, 0x4a2012, 0.9)
+      .setStrokeStyle(1, 0xf0bd85, 0.95)
+      .setDepth(299);
+    this.add.rectangle(24, 130, 10, 36, 0x34d399, 0.84).setDepth(300);
+
     this.pressureText = this.add
-      .text(18, 98, '', {
-        fontFamily: 'Consolas',
-        fontSize: '16px',
-        color: '#fcd34d'
+      .text(34, 113, '', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '24px',
+        color: '#ffe9c7'
       })
       .setDepth(300)
+      .setLetterSpacing(0.8)
       .setShadow(0, 2, '#000000', 8);
 
     this.createEffectHud();
@@ -1543,13 +2472,14 @@ export default class GameScene extends Phaser.Scene {
   createEffectHud() {
     this.effectHudGraphics = this.add.graphics().setDepth(304);
     this.effectHudTitle = this.add
-      .text(0, 0, 'ACTIVE EFFECTS', {
-        fontFamily: 'Consolas',
-        fontSize: '14px',
-        color: '#cbd5e1'
+      .text(0, 0, 'EFFECTS', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '30px',
+        color: '#ffeed6'
       })
       .setDepth(305)
-      .setOrigin(1, 0);
+      .setOrigin(1, 0)
+      .setLetterSpacing(1.4);
     this.effectHudRows = [];
   }
 
@@ -1560,96 +2490,96 @@ export default class GameScene extends Phaser.Scene {
         name: 'Coolant Flush',
         archetype: 'rescue',
         rarity: 'common',
-        description: 'Reset speeds to base, then ramp back up.',
-        note: 'Speed reset and smooth recovery.'
+        description: 'Reset speed, smooth ramp.',
+        note: 'Reset then recover.'
       },
       {
         id: 'smart_sort_protocol',
         name: 'Smart Sort Protocol',
         archetype: 'rescue',
         rarity: 'rare',
-        description: 'Auto-sort active items and clear the main belt.',
-        note: 'Emergency reshuffle and breathing room.'
+        description: 'Auto-sort and clear line.',
+        note: 'Fast reset.'
       },
       {
         id: 'emergency_brake',
         name: 'Emergency Brake',
         archetype: 'rescue',
         rarity: 'common',
-        description: 'Apply factory-wide slow motion for 7 seconds.',
-        note: '45% slow, next 12 spawns score -20%.'
+        description: 'Slow time for 7s.',
+        note: 'Score penalty after.'
       },
       {
         id: 'overflow_purge',
         name: 'Overflow Purge',
         archetype: 'rescue',
         rarity: 'rare',
-        description: 'Delete up to 5 oldest jammed items immediately.',
-        note: 'Pay 250 + 30 per purged item.'
+        description: 'Purge up to 5 jams.',
+        note: 'Costs score.'
       },
       {
         id: 'inserter_calibration',
         name: 'Inserter Calibration',
         archetype: 'control',
         rarity: 'common',
-        description: 'Prioritize type-correct sidebelt routing temporarily.',
-        note: 'Routes matching type first, then equalization fallback.'
+        description: 'Prioritize correct routing.',
+        note: 'Safer side flow.'
       },
       {
         id: 'chest_priority_mode',
         name: 'Chest Priority Mode',
         archetype: 'control',
         rarity: 'common',
-        description: 'Temporarily enable full chest forgiveness.',
-        note: 'Auto-clears jammed lane ends and accepts wrong items for 15s.'
+        description: 'Chest forgiveness on.',
+        note: 'Auto clear + accept for 15s.'
       },
       {
         id: 'belt_rephase',
         name: 'Belt Rephase',
         archetype: 'control',
         rarity: 'common',
-        description: 'Increase side-belt spacing tolerance for 12 seconds.',
-        note: 'Safer side flow, main belt +8% speed.'
+        description: 'Wider side spacing for 12s.',
+        note: 'Main belt gets faster.'
       },
       {
         id: 'predictive_pull',
         name: 'Predictive Pull',
         archetype: 'control',
         rarity: 'rare',
-        description: 'Improve routing bias for the next 20 spawned items.',
-        note: 'Spawn interval is 8% faster while active.'
+        description: 'Bias next 20 spawns.',
+        note: '8% faster spawns.'
       },
       {
         id: 'turbo_shift',
         name: 'Turbo Shift',
         archetype: 'greed',
         rarity: 'rare',
-        description: 'Higher score gain at higher speed pressure.',
-        note: '+25% score, +18% belt speed for 18 seconds.'
+        description: 'More score, more speed.',
+        note: '+25% score for 18s.'
       },
       {
         id: 'combo_furnace',
         name: 'Combo Furnace',
         archetype: 'greed',
         rarity: 'rare',
-        description: 'Boost combo growth with bigger downside risk.',
-        note: '+2 multiplier gain, one jam costs 200.'
+        description: 'Combo grows faster.',
+        note: 'One jam hurts more.'
       },
       {
         id: 'risky_throughput',
         name: 'Risky Throughput',
         archetype: 'greed',
         rarity: 'common',
-        description: 'Push spawn rate up for 16 seconds.',
-        note: '+25% spawn rate, +2 bonus per correct consume.'
+        description: 'Spawn rate up for 16s.',
+        note: 'Extra score per hit.'
       },
       {
         id: 'fragile_jackpot',
         name: 'Fragile Jackpot',
         archetype: 'greed',
         rarity: 'epic',
-        description: 'Gain instant points at the cost of drag stability.',
-        note: '+1200 score, no drag slow-mo for 10 seconds.'
+        description: 'Instant points, fragile control.',
+        note: 'No drag slow-mo for 10s.'
       }
     ];
   }
@@ -1747,19 +2677,21 @@ export default class GameScene extends Phaser.Scene {
     while (this.effectHudRows.length < count) {
       const labelText = this.add
         .text(0, 0, '', {
-          fontFamily: 'Consolas',
-          fontSize: '13px',
-          color: '#e2e8f0'
+          fontFamily: GAME_UI_FONT,
+          fontSize: '20px',
+          color: '#ffeedd'
         })
+        .setLetterSpacing(0.5)
         .setDepth(305);
 
       const valueText = this.add
         .text(0, 0, '', {
-          fontFamily: 'Consolas',
-          fontSize: '12px',
-          color: '#94a3b8'
+          fontFamily: GAME_UI_FONT,
+          fontSize: '18px',
+          color: '#ffd8ad'
         })
         .setDepth(305)
+        .setLetterSpacing(0.5)
         .setOrigin(1, 0);
 
       this.effectHudRows.push({ labelText, valueText });
@@ -1787,30 +2719,34 @@ export default class GameScene extends Phaser.Scene {
 
     const panelRight = 1262;
     const panelTop = 12;
-    const panelWidth = 350;
+    const panelWidth = 378;
     const panelLeft = panelRight - panelWidth;
-    const padding = 10;
-    const titleHeight = 18;
-    const rowHeight = 32;
-    const barHeight = 6;
-    const panelHeight = padding + titleHeight + 8 + entries.length * rowHeight + 8;
+    const padding = 12;
+    const titleHeight = 28;
+    const rowHeight = 38;
+    const barHeight = 8;
+    const panelHeight = padding + titleHeight + 10 + entries.length * rowHeight + 10;
 
-    this.effectHudGraphics.fillStyle(0x0b1220, 0.88);
-    this.effectHudGraphics.fillRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 8);
-    this.effectHudGraphics.lineStyle(1, 0x334155, 0.95);
-    this.effectHudGraphics.strokeRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 8);
+    this.effectHudGraphics.fillStyle(0x4a2012, 0.88);
+    this.effectHudGraphics.fillRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 12);
+    this.effectHudGraphics.lineStyle(2, 0xf0bd85, 0.92);
+    this.effectHudGraphics.strokeRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 12);
+    this.effectHudGraphics.fillStyle(0x34d399, 0.82);
+    this.effectHudGraphics.fillRoundedRect(panelLeft + 8, panelTop + 8, 8, panelHeight - 16, 4);
+    this.effectHudGraphics.fillStyle(0xffffff, 0.1);
+    this.effectHudGraphics.fillRoundedRect(panelLeft + 20, panelTop + 8, panelWidth - 28, 30, 6);
 
     this.effectHudTitle.setVisible(true);
-    this.effectHudTitle.setPosition(panelRight - padding, panelTop + padding);
+    this.effectHudTitle.setPosition(panelRight - padding, panelTop + 8);
 
     this.ensureEffectHudRows(entries.length);
 
-    const barX = panelLeft + padding;
-    const barWidth = panelWidth - padding * 2;
+    const barX = panelLeft + padding + 8;
+    const barWidth = panelWidth - (padding + 8) * 2;
 
     entries.forEach((entry, index) => {
-      const rowTop = panelTop + padding + titleHeight + 6 + index * rowHeight;
-      const barY = rowTop + 20;
+      const rowTop = panelTop + padding + titleHeight + 10 + index * rowHeight;
+      const barY = rowTop + 24;
 
       const row = this.effectHudRows[index];
       row.labelText.setVisible(true);
@@ -1820,8 +2756,8 @@ export default class GameScene extends Phaser.Scene {
       row.labelText.setText(entry.label);
       row.valueText.setText(entry.value);
 
-      this.effectHudGraphics.fillStyle(0x1f2937, 0.96);
-      this.effectHudGraphics.fillRect(barX, barY, barWidth, barHeight);
+      this.effectHudGraphics.fillStyle(0x6b3418, 0.96);
+      this.effectHudGraphics.fillRoundedRect(barX, barY, barWidth, barHeight, 4);
 
       const clampedProgress = Phaser.Math.Clamp(entry.progress ?? 0, 0, 1);
       let fillWidth = Math.floor(barWidth * clampedProgress);
@@ -1831,7 +2767,7 @@ export default class GameScene extends Phaser.Scene {
 
       if (fillWidth > 0) {
         this.effectHudGraphics.fillStyle(entry.color ?? 0x38bdf8, 1);
-        this.effectHudGraphics.fillRect(barX, barY, fillWidth, barHeight);
+        this.effectHudGraphics.fillRoundedRect(barX, barY, fillWidth, barHeight, 4);
       }
     });
   }
@@ -2268,46 +3204,58 @@ export default class GameScene extends Phaser.Scene {
     this.highPressureHoldMs = 0;
 
     const container = this.add.container(0, 0).setDepth(360);
-    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x020617, 0.78).setInteractive();
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.76).setInteractive();
     scrim.on('pointerdown', (_pointer, _x, _y, event) => {
       event?.stopPropagation();
     });
 
-    const panel = this.add.rectangle(640, 360, 1160, 520, 0x0b1220, 0.96).setStrokeStyle(2, 0x334155, 1);
+    const leftGlow = this.add.circle(298, 184, 250, 0xf59e0b, 0.14).setBlendMode(Phaser.BlendModes.ADD);
+    const rightGlow = this.add.circle(994, 560, 270, 0x34d399, 0.1).setBlendMode(Phaser.BlendModes.ADD);
+    const panelShadow = this.add.rectangle(640, 368, 1168, 530, 0x1b0905, 0.56);
+    const panel = this.add.rectangle(640, 360, 1168, 530, 0x4a2012, 0.96).setStrokeStyle(2, 0xf0bd85, 1);
+    const topStrip = this.add.rectangle(640, 136, 1124, 34, 0xffffff, 0.14);
+
     const title = this.add
-      .text(640, 148, 'SYSTEM CARD DRAFT', {
-        fontFamily: 'Consolas',
-        fontSize: '34px',
-        color: '#e2e8f0'
+      .text(640, 146, 'PICK A BOOST', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '62px',
+        color: '#fff0d9'
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setLetterSpacing(1.6);
 
     const reasonLabel = this.add
-      .text(640, 188, `Trigger: ${this.formatDraftTrigger(triggerType)} | Pressure ${Math.round(this.currentPressure * 100)}%`, {
-        fontFamily: 'Consolas',
-        fontSize: '18px',
-        color: '#93c5fd'
+      .text(640, 196, `${this.formatDraftTrigger(triggerType)} · ${Math.round(this.currentPressure * 100)}%`, {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '30px',
+        color: '#ffd7ab'
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setLetterSpacing(0.8);
 
     const helper = this.add
-      .text(640, 585, 'Choose one card  |  Mouse click or Left/Right + Enter', {
-        fontFamily: 'Consolas',
-        fontSize: '16px',
-        color: '#94a3b8'
+      .text(640, 602, 'Pick 1', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '24px',
+        color: '#ffe0be'
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setLetterSpacing(0.8);
 
+    leftGlow.setAlpha(0);
+    rightGlow.setAlpha(0);
+    panelShadow.setAlpha(0);
     panel.setAlpha(0);
     panel.setScale(0.96);
+    topStrip.setAlpha(0);
     title.setAlpha(0);
     reasonLabel.setAlpha(0);
     helper.setAlpha(0);
 
-    container.add([scrim, panel, title, reasonLabel, helper]);
+    container.add([scrim, leftGlow, rightGlow, panelShadow, panel, topStrip, title, reasonLabel, helper]);
 
-    const cardWidth = 320;
-    const cardHeight = 300;
+    const cardWidth = 332;
+    const cardHeight = 286;
     const gap = 32;
     const firstX = 640 - cardWidth - gap;
     const cardY = 360;
@@ -2321,7 +3269,7 @@ export default class GameScene extends Phaser.Scene {
     this.setDraftSelection(0);
 
     this.tweens.add({
-      targets: [panel, title, reasonLabel, helper],
+      targets: [leftGlow, rightGlow, panelShadow, panel, topStrip, title, reasonLabel, helper],
       alpha: 1,
       duration: 220,
       ease: 'Quad.Out'
@@ -2438,49 +3386,77 @@ export default class GameScene extends Phaser.Scene {
 
   createDraftCardVisual(container, card, x, y, width, height, index) {
     const archetypeColorById = {
-      rescue: 0x22d3ee,
+      rescue: 0x34d399,
       control: 0xf59e0b,
-      greed: 0xef4444
+      greed: 0xfb7185
+    };
+
+    const rarityColorById = {
+      common: 0xe7a25e,
+      rare: 0xf59e0b,
+      epic: 0xfb7185
     };
 
     const archetypeColor = archetypeColorById[card.archetype] ?? 0x94a3b8;
+    const rarityColor = rarityColorById[card.rarity] ?? 0x93c5fd;
+
+    const cardShadow = this.add.rectangle(x, y + 8, width, height, 0x1b0905, 0.56);
 
     const cardBg = this.add
-      .rectangle(x, y, width, height, 0x111827, 0.95)
+      .rectangle(x, y, width, height, 0x7a4327, 0.95)
       .setStrokeStyle(2, archetypeColor, 1)
       .setInteractive({ useHandCursor: true });
-    cardBg.setAlpha(0);
-    cardBg.setScale(0.9);
+    const topStrip = this.add.rectangle(x, y - height * 0.5 + 20, width - 20, 26, archetypeColor, 0.2);
+    const rarityChip = this.add
+      .rectangle(x + width * 0.5 - 56, y - height * 0.5 + 20, 92, 22, 0xffedd2, 0.95)
+      .setStrokeStyle(1, rarityColor, 0.9);
 
-    const archetype = this.add
-      .text(x, y - 112, card.archetype.toUpperCase(), {
-        fontFamily: 'Consolas',
-        fontSize: '15px',
-        color: '#cbd5e1'
+    const rarityLabel = this.add
+      .text(rarityChip.x, rarityChip.y, card.rarity.toUpperCase(), {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '18px',
+        color: '#7a3f24'
       })
       .setOrigin(0.5)
+      .setLetterSpacing(0.8);
+
+    cardBg.setAlpha(0);
+    cardBg.setScale(0.9);
+    cardShadow.setAlpha(0);
+    topStrip.setAlpha(0);
+    rarityChip.setAlpha(0);
+    rarityLabel.setAlpha(0);
+
+    const archetype = this.add
+      .text(x - width * 0.5 + 18, y - 106, card.archetype.toUpperCase(), {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '22px',
+        color: '#ffe5c5'
+      })
+      .setOrigin(0, 0.5)
+      .setLetterSpacing(0.7)
       .setAlpha(0);
 
     const name = this.add
-      .text(x, y - 74, card.name, {
-        fontFamily: 'Consolas',
-        fontSize: '24px',
-        color: '#f8fafc',
-        align: 'center',
-        wordWrap: { width: width - 36 }
+      .text(x - width * 0.5 + 18, y - 58, card.name, {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '38px',
+        color: '#fff8ec',
+        align: 'left',
+        wordWrap: { width: width - 34 }
       })
-      .setOrigin(0.5)
+      .setOrigin(0, 0.5)
       .setAlpha(0);
 
     const description = this.add
-      .text(x, y - 6, card.description, {
-        fontFamily: 'Consolas',
-        fontSize: '16px',
-        color: '#e2e8f0',
-        align: 'center',
+      .text(x - width * 0.5 + 18, y + 18, card.description, {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '22px',
+        color: '#ffe2c5',
+        align: 'left',
         wordWrap: { width: width - 34 }
       })
-      .setOrigin(0.5)
+      .setOrigin(0, 0.5)
       .setAlpha(0);
 
     cardBg.on('pointerover', () => {
@@ -2494,12 +3470,12 @@ export default class GameScene extends Phaser.Scene {
       this.pickDraftCard(index);
     });
 
-    container.add([cardBg, archetype, name, description]);
-    this.cardDraftEntries.push({ cardBg, archetypeColor, selectionTween: null });
+    container.add([cardShadow, cardBg, topStrip, rarityChip, rarityLabel, archetype, name, description]);
+    this.cardDraftEntries.push({ cardBg, cardShadow, topStrip, rarityChip, rarityLabel, archetypeColor, selectionTween: null });
 
     const enterDelay = 80 + index * 70;
     this.tweens.add({
-      targets: [cardBg, archetype, name, description],
+      targets: [cardShadow, cardBg, topStrip, rarityChip, rarityLabel, archetype, name, description],
       alpha: 1,
       duration: 190,
       delay: enterDelay,
@@ -2537,11 +3513,14 @@ export default class GameScene extends Phaser.Scene {
   refreshDraftSelection() {
     this.cardDraftEntries.forEach((entry, index) => {
       const selected = index === this.cardDraftSelectedIndex;
-      const strokeColor = selected ? 0xf8fafc : entry.archetypeColor;
-      const fillColor = selected ? 0x1e293b : 0x111827;
+      const strokeColor = selected ? 0xffeed4 : entry.archetypeColor;
+      const fillColor = selected ? 0x9a5831 : 0x7a4327;
 
-      entry.cardBg.setFillStyle(fillColor, 0.95);
+      entry.cardBg.setFillStyle(fillColor, 0.96);
       entry.cardBg.setStrokeStyle(selected ? 4 : 2, strokeColor, 1);
+      entry.topStrip.setFillStyle(entry.archetypeColor, selected ? 0.42 : 0.2);
+      entry.rarityChip.setAlpha(selected ? 1 : 0.86);
+      entry.rarityLabel.setAlpha(selected ? 1 : 0.86);
 
       if (entry.selectionTween) {
         entry.selectionTween.remove();
@@ -2549,7 +3528,7 @@ export default class GameScene extends Phaser.Scene {
       }
 
       entry.selectionTween = this.tweens.add({
-        targets: entry.cardBg,
+        targets: [entry.cardBg, entry.cardShadow, entry.topStrip, entry.rarityChip, entry.rarityLabel],
         scaleX: selected ? 1.04 : 1,
         scaleY: selected ? 1.04 : 1,
         duration: 110,
@@ -2648,12 +3627,13 @@ export default class GameScene extends Phaser.Scene {
 
     const pickToast = this.add
       .text(640, 132, `${chosenCard.name} selected`, {
-        fontFamily: 'Consolas',
-        fontSize: '26px',
-        color: '#e2e8f0'
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '44px',
+        color: '#f1f8ff'
       })
       .setDepth(320)
       .setOrigin(0.5)
+      .setLetterSpacing(1.5)
       .setShadow(0, 2, '#000000', 8);
     pickToast.setScale(0.88);
 
@@ -2691,16 +3671,16 @@ export default class GameScene extends Phaser.Scene {
 
   formatDraftTrigger(triggerType) {
     if (triggerType === 'emergency') {
-      return 'Emergency';
+      return 'Rush';
     }
     if (triggerType === 'score') {
-      return 'Score Milestone';
+      return 'Milestone';
     }
     if (triggerType === 'pity') {
-      return 'Pity Timer';
+      return 'Mercy';
     }
 
-    return 'Unknown';
+    return 'Boost';
   }
 
   abortActiveDrag() {
@@ -2840,7 +3820,7 @@ export default class GameScene extends Phaser.Scene {
 
     const floater = this.add
       .text(x, y, label, {
-        fontFamily: 'Consolas',
+        fontFamily: GAME_UI_FONT,
         fontSize: `${fontSize}px`,
         color,
         stroke: '#020617',
@@ -2969,46 +3949,61 @@ export default class GameScene extends Phaser.Scene {
   }
 
   createScoreUi() {
-    const baseX = 18;
-    const baseY = 16;
+    const baseX = 24;
+    const baseY = 18;
     const shadow = { offsetX: 0, offsetY: 2, color: '#000000', blur: 8 };
+
+    this.add
+      .rectangle(192, 58, 352, 92, 0x4a2012, 0.9)
+      .setDepth(298)
+      .setStrokeStyle(1, 0xf0bd85, 0.95);
+    this.add.rectangle(22, 58, 8, 92, 0x34d399, 0.85).setDepth(299);
+    this.add
+      .rectangle(640, 694, 516, 44, 0x4a2012, 0.88)
+      .setDepth(298)
+      .setStrokeStyle(1, 0xf0bd85, 0.9);
 
     this.levelInfoText = this.add
       .text(640, 694, '', {
-        fontFamily: 'Consolas',
-        fontSize: '20px',
-        color: '#93c5fd',
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '34px',
+        color: '#ffe6c5',
         align: 'center'
       })
       .setOrigin(0.5)
       .setDepth(300)
+      .setLetterSpacing(2)
       .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
 
     this.quotaText = this.add
       .text(baseX, baseY, '', {
-        fontFamily: 'Consolas',
-        fontSize: '16px',
-        color: '#86efac'
+        fontFamily: GAME_UI_FONT,
+        fontSize: '22px',
+        color: '#d4f7e6'
       })
       .setDepth(300)
+      .setLetterSpacing(0.8)
       .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
 
     this.scoreText = this.add
-      .text(baseX, baseY + 26, '', {
-        fontFamily: 'Consolas',
-        fontSize: '20px',
-        color: '#e2e8f0'
+      .text(baseX, baseY + 28, '', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '34px',
+        color: '#fff9ef'
       })
       .setDepth(300)
+      .setLetterSpacing(1.5)
       .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
 
     this.multiplierText = this.add
-      .text(baseX, baseY + 56, '', {
-        fontFamily: 'Consolas',
-        fontSize: '18px',
-        color: '#67e8f9'
+      .text(baseX + 216, baseY + 3, '', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '22px',
+        color: '#ffd8ad'
       })
+      .setOrigin(0, 0)
       .setDepth(300)
+      .setLetterSpacing(0.8)
       .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
 
     this.refreshScoreUi();
@@ -3021,9 +4016,9 @@ export default class GameScene extends Phaser.Scene {
 
     if (this.quotaText) {
       if (this.isFiniteLevel) {
-        this.quotaText.setText(`PACKAGED ${this.acceptedCount}/${this.levelQuota}`);
+        this.quotaText.setText(`BOX ${this.acceptedCount}/${this.levelQuota}`);
       } else {
-        this.quotaText.setText(`PACKAGED ${this.acceptedCount}`);
+        this.quotaText.setText(`BOX ${this.acceptedCount}`);
       }
     }
 
@@ -3031,7 +4026,7 @@ export default class GameScene extends Phaser.Scene {
       this.scoreText.setText(`SCORE ${this.score}`);
     }
     if (this.multiplierText) {
-      this.multiplierText.setText(`MULT x${this.multiplier}`);
+      this.multiplierText.setText(`x${this.multiplier}`);
     }
   }
 
@@ -3124,6 +4119,7 @@ export default class GameScene extends Phaser.Scene {
   update(_time, delta) {
     this.updateHitStop(delta);
     this.updateAudio(delta);
+    this.updateChestBubbleSlideshows(delta);
 
     if (this.isGameOver || this.levelComplete) {
       this.updateEffectHud();
@@ -3208,6 +4204,9 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.levelComplete = true;
+    if (this.levelMode === 'campaign') {
+      markCampaignLevelCompleted(this.levelId);
+    }
     this.closeCardDraft();
     this.setSlowMotion(false);
     this.abortActiveDrag();
@@ -3215,35 +4214,53 @@ export default class GameScene extends Phaser.Scene {
     this.playSfx('combo-tier', 1.2);
     this.emitShockRing(640, 360, 0x22c55e, 3.4, 280);
     this.rumble(0.36, 0.22, 180);
+    this.startLevelClearMusicTransition();
 
-    this.levelResultOverlay = this.add.rectangle(640, 360, 1280, 720, 0x020617, 0.68).setDepth(380);
+    this.levelResultOverlay = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.68).setDepth(380);
     this.levelResultText = this.add
-      .text(640, 330, `LEVEL CLEAR\n${this.levelName}\nPACKAGED ${this.acceptedCount}/${this.levelQuota}`, {
-        fontFamily: 'Segoe UI',
-        fontSize: '50px',
+      .text(640, 330, `SHIFT CLEAR\n${this.levelName}\n${this.acceptedCount}/${this.levelQuota}`, {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '54px',
         align: 'center',
-        color: '#dcfce7'
+        color: '#ffeed6'
       })
       .setOrigin(0.5)
       .setDepth(390)
       .setShadow(0, 4, '#000000', 12);
 
+    this.levelResultText.setAlpha(0);
+    this.tweens.add({
+      targets: this.levelResultText,
+      alpha: 1,
+      duration: 220,
+      ease: 'Quad.Out'
+    });
+
     const nextLevelId = getNextCampaignLevelId(this.levelId);
     const subText = nextLevelId
-      ? `Next: ${nextLevelId} (loading...)`
-      : 'Campaign complete. Returning to level chooser...';
+      ? `Next: ${nextLevelId}`
+      : 'Campaign Clear';
 
     this.add
       .text(640, 456, subText, {
-        fontFamily: 'Consolas',
-        fontSize: '24px',
+        fontFamily: GAME_UI_FONT,
+        fontSize: '30px',
         align: 'center',
-        color: '#93c5fd'
+        color: '#ffd8ad'
       })
       .setOrigin(0.5)
       .setDepth(391);
 
-    this.time.delayedCall(1900, () => {
+    const transitionDelayMs = 1900;
+    const preTransitionFadeMs = 220;
+
+    this.time.delayedCall(Math.max(0, transitionDelayMs - preTransitionFadeMs), () => {
+      this.fadeOutVictoryMusicFast(preTransitionFadeMs / 1000, false);
+    });
+
+    this.time.delayedCall(transitionDelayMs, () => {
+      this.stopVictoryMusicSource();
+      this.victoryMusicPlaybackState = 'idle';
       if (nextLevelId) {
         this.scene.start('GameScene', { levelId: nextLevelId });
         return;
@@ -3302,13 +4319,13 @@ export default class GameScene extends Phaser.Scene {
     this.emitShockRing(640, 360, 0xef4444, 3.8, 350);
     this.rumble(0.7, 0.5, 260);
 
-    this.gameOverOverlay = this.add.rectangle(640, 360, 1280, 720, 0x020617, 0.72).setDepth(380);
+    this.gameOverOverlay = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.72).setDepth(380);
     this.gameOverText = this.add
-      .text(640, 322, `SYSTEM CLOGGED\n${this.levelName}\nSCORE ${this.score}`, {
-        fontFamily: 'Segoe UI',
-        fontSize: '48px',
+      .text(640, 322, `LINE JAMMED\n${this.levelName}\n${this.score}`, {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '52px',
         align: 'center',
-        color: '#e2e8f0'
+        color: '#ffe5dc'
       })
       .setOrigin(0.5)
       .setDepth(390)
@@ -3322,17 +4339,27 @@ export default class GameScene extends Phaser.Scene {
       ease: 'Quad.Out'
     });
 
+    const returnToMenu = this.levelMode === 'endless';
+    const gameOverReturnText = returnToMenu
+      ? 'Main Menu'
+      : 'Campaign';
+
     this.add
-      .text(640, 450, 'Returning to level chooser...', {
-        fontFamily: 'Consolas',
-        fontSize: '24px',
+      .text(640, 450, gameOverReturnText, {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '30px',
         align: 'center',
-        color: '#93c5fd'
+        color: '#ffd8ad'
       })
       .setOrigin(0.5)
       .setDepth(391);
 
     this.time.delayedCall(1900, () => {
+      if (returnToMenu) {
+        this.scene.start('MainMenuScene');
+        return;
+      }
+
       this.scene.start('LevelSelectScene', { selectedLevelId: this.levelId });
     });
   }
@@ -3344,8 +4371,8 @@ export default class GameScene extends Phaser.Scene {
 
     if (this.layoutUsesMainBelt) {
       this.mainBeltBody = this.add
-        .rectangle(this.mainX, 360, MAIN_BELT_WIDTH, MAIN_BELT_HEIGHT, 0x1e293b, 1)
-        .setStrokeStyle(2, 0x475569, 1)
+        .rectangle(this.mainX, 360, MAIN_BELT_WIDTH, MAIN_BELT_HEIGHT, 0x5b2d1a, 1)
+        .setStrokeStyle(2, 0xd39a67, 1)
         .setDepth(1);
       this.mainBeltLines = this.add.graphics().setDepth(2);
       this.mainBeltLineConfig = {
@@ -3366,12 +4393,30 @@ export default class GameScene extends Phaser.Scene {
 
       if (this.levelLayoutFamily === 'v_swap') {
         this.layoutDecorationGraphics = this.add.graphics().setDepth(0);
-        this.layoutDecorationGraphics.lineStyle(16, 0x1e293b, 0.88);
+        this.layoutDecorationGraphics.lineStyle(16, 0x5b2d1a, 0.88);
         this.layoutDecorationGraphics.lineBetween(this.mainX, 156, 402, 290);
         this.layoutDecorationGraphics.lineBetween(this.mainX, 156, 878, 460);
-        this.layoutDecorationGraphics.lineStyle(2, 0x475569, 1);
+        this.layoutDecorationGraphics.lineStyle(2, 0xd39a67, 1);
         this.layoutDecorationGraphics.lineBetween(this.mainX, 156, 402, 290);
         this.layoutDecorationGraphics.lineBetween(this.mainX, 156, 878, 460);
+      } else if (this.levelLayoutFamily === 'triangle_mesh') {
+        this.layoutDecorationGraphics = this.add.graphics().setDepth(0);
+        this.layoutDecorationGraphics.lineStyle(14, 0x5b2d1a, 0.88);
+        this.layoutDecorationGraphics.lineBetween(this.mainX, 170, 520, 400);
+        this.layoutDecorationGraphics.lineBetween(this.mainX, 170, 760, 560);
+        this.layoutDecorationGraphics.lineBetween(520, 400, 760, 560);
+        this.layoutDecorationGraphics.lineStyle(2, 0xd39a67, 1);
+        this.layoutDecorationGraphics.lineBetween(this.mainX, 170, 520, 400);
+        this.layoutDecorationGraphics.lineBetween(this.mainX, 170, 760, 560);
+        this.layoutDecorationGraphics.lineBetween(520, 400, 760, 560);
+      } else if (this.levelLayoutFamily === 'dual_spine') {
+        this.layoutDecorationGraphics = this.add.graphics().setDepth(0);
+        this.layoutDecorationGraphics.lineStyle(18, 0x5b2d1a, 0.9);
+        this.layoutDecorationGraphics.lineBetween(460, 110, 460, 610);
+        this.layoutDecorationGraphics.lineBetween(820, 110, 820, 610);
+        this.layoutDecorationGraphics.lineStyle(2, 0xd39a67, 1);
+        this.layoutDecorationGraphics.lineBetween(460, 110, 460, 610);
+        this.layoutDecorationGraphics.lineBetween(820, 110, 820, 610);
       }
     }
 
@@ -3387,9 +4432,9 @@ export default class GameScene extends Phaser.Scene {
       const laneCenterX = (intakeX + laneConfig.endX) * 0.5;
 
       const beltBody = this.add
-        .rectangle(laneCenterX, laneConfig.y, laneWidth, SIDE_BELT_HEIGHT, 0x1e293b, 1)
+        .rectangle(laneCenterX, laneConfig.y, laneWidth, SIDE_BELT_HEIGHT, 0x5b2d1a, 1)
         .setDepth(1)
-        .setStrokeStyle(2, 0x475569, 1);
+        .setStrokeStyle(2, 0xd39a67, 1);
       const beltLines = this.add.graphics().setDepth(2);
       const beltLineConfig = {
         x: laneCenterX,
@@ -3414,7 +4459,7 @@ export default class GameScene extends Phaser.Scene {
         chestBaseScale = chestMaxSize > 0 ? 88 / chestMaxSize : 1;
         chestSprite.setScale(chestBaseScale);
       } else {
-        this.add.rectangle(laneConfig.chestX, laneConfig.y, 114, 56, 0x334155, 1).setStrokeStyle(3, laneColor, 1);
+        this.add.rectangle(laneConfig.chestX, laneConfig.y, 114, 56, 0x704124, 1).setStrokeStyle(3, laneColor, 1);
       }
 
       // Add chest inserter claw
@@ -3423,24 +4468,41 @@ export default class GameScene extends Phaser.Scene {
       // Chest inserter should face the belt (toward the center) at rest.
       const chestClawBaseAngle = laneConfig.direction > 0 ? 0 : 180;
       chestClawContainer.setAngle(chestClawBaseAngle);
-      const chestClawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x0f172a, 1).setStrokeStyle(2, laneColor, 1);
+      const chestClawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x6b3418, 1).setStrokeStyle(2, laneColor, 1);
       const chestClawGraphics = this.add.graphics();
-      chestClawGraphics.lineStyle(4, 0x94a3b8, 1);
+      chestClawGraphics.lineStyle(4, 0xffd7ab, 1);
       chestClawGraphics.lineBetween(0, 0, -CLAW_ARM_LENGTH, 0);
       chestClawGraphics.lineStyle(4, laneColor, 1);
       chestClawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, -CLAW_JAW_SPREAD);
       chestClawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, CLAW_JAW_SPREAD);
       chestClawContainer.add([chestClawGraphics, chestClawBase]);
 
-      this.add
-        .text(laneConfig.chestX, laneConfig.y + 56, laneConfig.label, {
-          fontFamily: 'Consolas',
-          fontSize: '14px',
-          color: '#e2e8f0'
-        })
-        .setOrigin(0.5)
-        .setDepth(8)
-        .setShadow(0, 2, '#000000', 8);
+      const laneTextureKeys = (
+        this.chestBubbleTextureKeysByFoodId[laneConfig.desiredType]
+        || this.textureKeysByFoodId[laneConfig.desiredType]
+        || []
+      )
+        .filter((textureKey) => this.textures.exists(textureKey));
+      let chestBubblePlate = null;
+      let chestBubbleIcon = null;
+      if (laneTextureKeys.length > 0) {
+        const laneIconKey = laneTextureKeys[0];
+        chestBubblePlate = this.add.circle(laneConfig.chestX, laneConfig.y + 56, 18, 0xffedd2, 0.95).setDepth(8);
+        chestBubbleIcon = this.add.image(laneConfig.chestX, laneConfig.y + 56, laneIconKey).setDepth(9);
+        const laneSource = this.textures.get(laneIconKey)?.getSourceImage();
+        const laneDim = Math.max(chestBubbleIcon.width, chestBubbleIcon.height, laneSource?.width || 0, laneSource?.height || 0);
+        if (laneDim > 0) {
+          chestBubbleIcon.setScale(CHEST_BUBBLE_ICON_SIZE / laneDim);
+        }
+        this.tweens.add({
+          targets: [chestBubblePlate, chestBubbleIcon],
+          y: { from: laneConfig.y + 53, to: laneConfig.y + 59 },
+          duration: 1700 + Math.random() * 450,
+          yoyo: true,
+          repeat: -1,
+          ease: 'Sine.InOut'
+        });
+      }
 
       const clawBaseAngle = laneConfig.direction > 0 ? 0 : 180;
       let clawContainer = null;
@@ -3450,9 +4512,9 @@ export default class GameScene extends Phaser.Scene {
         clawContainer = this.add.container(clawX, laneConfig.y).setDepth(9);
         clawContainer.setAngle(clawBaseAngle);
 
-        const clawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x0f172a, 1).setStrokeStyle(2, laneColor, 1);
+        const clawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x6b3418, 1).setStrokeStyle(2, laneColor, 1);
         const clawGraphics = this.add.graphics();
-        clawGraphics.lineStyle(4, 0x94a3b8, 1);
+        clawGraphics.lineStyle(4, 0xffd7ab, 1);
         clawGraphics.lineBetween(0, 0, -CLAW_ARM_LENGTH, 0);
         clawGraphics.lineStyle(4, laneColor, 1);
         clawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, -CLAW_JAW_SPREAD);
@@ -3476,9 +4538,60 @@ export default class GameScene extends Phaser.Scene {
         chestClawBaseAngle,
         chestSprite,
         chestBaseScale,
-        chestAnimToken: 0
+        chestAnimToken: 0,
+        chestBubblePlate,
+        chestBubbleIcon,
+        chestBubbleTextureKeys: laneTextureKeys,
+        chestBubbleTextureIndex: 0,
+        chestBubbleSwapMs: 0,
+        chestBubbleSwapIntervalMs: CHEST_BUBBLE_SWAP_INTERVAL_MS
       };
     });
+  }
+
+  updateChestBubbleSlideshows(deltaMs) {
+    if (deltaMs <= 0) {
+      return;
+    }
+
+    for (const lane of Object.values(this.lanesById)) {
+      if (!lane?.chestBubbleIcon?.active) {
+        continue;
+      }
+
+      const textureKeys = lane.chestBubbleTextureKeys;
+      if (!Array.isArray(textureKeys) || textureKeys.length <= 1) {
+        continue;
+      }
+
+      const swapIntervalMs = Math.max(150, lane.chestBubbleSwapIntervalMs || CHEST_BUBBLE_SWAP_INTERVAL_MS);
+      lane.chestBubbleSwapMs += deltaMs;
+      if (lane.chestBubbleSwapMs < swapIntervalMs) {
+        continue;
+      }
+
+      const swapSteps = Math.floor(lane.chestBubbleSwapMs / swapIntervalMs);
+      lane.chestBubbleSwapMs -= swapSteps * swapIntervalMs;
+      lane.chestBubbleTextureIndex = (lane.chestBubbleTextureIndex + swapSteps) % textureKeys.length;
+
+      const nextTextureKey = textureKeys[lane.chestBubbleTextureIndex];
+      if (!nextTextureKey || !this.textures.exists(nextTextureKey)) {
+        continue;
+      }
+
+      lane.chestBubbleIcon.setTexture(nextTextureKey);
+
+      const source = this.textures.get(nextTextureKey)?.getSourceImage();
+      const iconDim = Math.max(
+        lane.chestBubbleIcon.width,
+        lane.chestBubbleIcon.height,
+        source?.width || 0,
+        source?.height || 0
+      );
+      if (iconDim > 0) {
+        lane.chestBubbleIcon.setScale(CHEST_BUBBLE_ICON_SIZE / iconDim);
+      }
+    }
   }
 
   updateConveyorVisuals(dt) {
