@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { DEFAULT_LEVEL_ID, getLevelById, getNextCampaignLevelId } from '../data/levels';
 
 const MAX_SPRITES_PER_TYPE = 24;
 const FOOD_RENDER_SIZE = 42;
@@ -17,6 +18,9 @@ const CLAW_JAW_LENGTH = 12;
 const CLAW_JAW_SPREAD = 10;
 
 const CHEST_PICKUP_BUFFER = 16;
+const STANDARD_CHEST_OFFSET_X = 80;
+const SPACING_RULE_LEVEL_START = 6;
+const SPACING_RULE_LEVEL_END = 12;
 
 const BELT_LINE_COLOR = 0x0f172a;
 const BELT_LINE_ALPHA = 0.38;
@@ -100,7 +104,7 @@ const FOOD_TYPES = [
   }
 ];
 
-const LANE_LAYOUT = [
+const BASE_LANE_LAYOUT = [
   {
     id: 'mid_left',
     label: 'Carbs',
@@ -143,19 +147,42 @@ const LANE_LAYOUT = [
   }
 ];
 
-const CLAW_ROWS = [
-  { y: 300, leftLaneId: 'mid_left', rightLaneId: 'mid_right' },
-  { y: 500, leftLaneId: 'bot_left', rightLaneId: 'bot_right' }
-];
+const DEFAULT_MAIN_START_Y = 72;
+const DEFAULT_MAIN_END_Y = 640;
+
+function cloneBaseLaneLayout() {
+  return BASE_LANE_LAYOUT.map((lane) => ({ ...lane }));
+}
+
+function toFiniteNumber(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
 
 export default class GameScene extends Phaser.Scene {
   constructor() {
     super('GameScene');
 
     this.mainX = 640;
-    this.mainStartY = 72;
-    this.mainEndY = 640;
-    this.mainLength = this.mainEndY - this.mainStartY;
+    this.mainStartY = DEFAULT_MAIN_START_Y;
+    this.mainEndY = DEFAULT_MAIN_END_Y;
+    this.mainFlowSign = 1;
+    this.mainLength = Math.abs(this.mainEndY - this.mainStartY);
+
+    this.levelId = DEFAULT_LEVEL_ID;
+    this.levelConfig = null;
+    this.levelMode = 'endless';
+    this.levelName = 'Endless';
+    this.levelLayoutFamily = 'rotated_h';
+    this.layoutUsesMainBelt = true;
+    this.directLaneSpawn = false;
+    this.showTransferClaws = true;
+    this.isFiniteLevel = false;
+    this.levelQuota = null;
+    this.levelComplete = false;
+    this.levelResultOverlay = null;
+    this.levelResultText = null;
+    this.levelInfoText = null;
+    this.quotaText = null;
 
     this.spawnTimerMs = 0;
     this.spawnBlockedThisFrame = false;
@@ -177,9 +204,25 @@ export default class GameScene extends Phaser.Scene {
     this.spawnIntervalMs = this.baseSpawnIntervalMs;
     this.itemSpacing = FOOD_RENDER_SIZE + 4;
 
+    this.defaultTuning = {
+      baseMainSpeed: this.baseMainSpeed,
+      baseSideSpeed: this.baseSideSpeed,
+      maxMainSpeed: this.maxMainSpeed,
+      maxSideSpeed: this.maxSideSpeed,
+      baseSpawnIntervalMs: this.baseSpawnIntervalMs,
+      minSpawnIntervalMs: this.minSpawnIntervalMs,
+      scoreRampStepPoints: this.scoreRampStepPoints,
+      mainSpeedPerStep: this.mainSpeedPerStep,
+      sideSpeedPerStep: this.sideSpeedPerStep,
+      spawnIntervalDecreasePerStepMs: this.spawnIntervalDecreasePerStepMs
+    };
+
     this.nextItemId = 1;
     this.items = [];
     this.lanesById = {};
+    this.laneLayout = cloneBaseLaneLayout();
+    this.clawRows = [];
+    this.activeFoodTypes = [...FOOD_TYPES];
     this.textureKeysByFoodId = {};
 
     this.acceptedCount = 0;
@@ -212,6 +255,7 @@ export default class GameScene extends Phaser.Scene {
     this.mainBeltLines = null;
     this.mainBeltLineConfig = null;
     this.mainBeltBody = null;
+    this.layoutDecorationGraphics = null;
     this.ambientGlow = null;
     this.flashOverlay = null;
     this.moodVignette = null;
@@ -283,7 +327,7 @@ export default class GameScene extends Phaser.Scene {
     this.inserterCalibrationMs = 0;
     this.chestPriorityDurationMs = 15000;
     this.chestPriorityMs = 0;
-    this.chestPriorityChargesByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
+    this.chestPriorityChargesByLaneId = this.laneLayout.reduce((acc, lane) => {
       acc[lane.id] = 0;
       return acc;
     }, {});
@@ -333,6 +377,353 @@ export default class GameScene extends Phaser.Scene {
       acc[food.id] = food;
       return acc;
     }, {});
+  }
+
+  init(data) {
+    const levelId = typeof data?.levelId === 'string' ? data.levelId : DEFAULT_LEVEL_ID;
+    const levelConfig = getLevelById(levelId);
+
+    this.levelConfig = levelConfig;
+    this.levelId = levelConfig.id;
+    this.applyLevelConfig(levelConfig);
+    this.resetRunState();
+  }
+
+  applyLevelConfig(levelConfig) {
+    const flowDirection = levelConfig?.mainFlowDirection === 'up' ? 'up' : 'down';
+    this.mainFlowSign = flowDirection === 'up' ? -1 : 1;
+    this.mainStartY = flowDirection === 'up' ? DEFAULT_MAIN_END_Y : DEFAULT_MAIN_START_Y;
+    this.mainEndY = flowDirection === 'up' ? DEFAULT_MAIN_START_Y : DEFAULT_MAIN_END_Y;
+    this.mainLength = Math.abs(this.mainEndY - this.mainStartY);
+
+    this.levelMode = levelConfig?.mode || 'endless';
+    this.levelName = levelConfig?.title || levelConfig?.id || 'Untitled Level';
+    this.levelLayoutFamily = levelConfig?.layoutFamily || 'rotated_h';
+    this.applyLayoutFamilyBehavior(this.levelLayoutFamily);
+    this.isFiniteLevel = this.levelMode !== 'endless' && Number.isFinite(levelConfig?.quota);
+    this.levelQuota = this.isFiniteLevel ? Math.max(1, Math.floor(levelConfig.quota)) : null;
+
+    const activeLaneIds = Array.isArray(levelConfig?.activeLaneIds) && levelConfig.activeLaneIds.length > 0
+      ? levelConfig.activeLaneIds
+      : BASE_LANE_LAYOUT.map((lane) => lane.id);
+
+    const chestMapping = levelConfig?.chestMapping || {};
+    const laneOverrides = levelConfig?.laneOverrides || {};
+
+    let laneLayout = cloneBaseLaneLayout().filter((lane) => activeLaneIds.includes(lane.id));
+    laneLayout = this.applyLayoutFamilyPreset(laneLayout, this.levelLayoutFamily);
+
+    this.laneLayout = laneLayout.map((lane) => {
+      const override = laneOverrides[lane.id] || {};
+      const desiredType = chestMapping[lane.id] || lane.desiredType;
+      const foodType = this.foodTypeById[desiredType] || this.foodTypeById[lane.desiredType] || FOOD_TYPES[0];
+
+      return {
+        ...lane,
+        ...override,
+        desiredType: foodType.id,
+        label: foodType.label,
+        chestLabel: `${foodType.label} Chest`
+      };
+    });
+
+    if (this.shouldEnforceCampaignSpacing(levelConfig)) {
+      this.laneLayout = this.enforceCampaignSpacing(this.laneLayout);
+    }
+
+    this.clawRows = this.buildClawRowsFromLaneLayout(this.laneLayout);
+
+    const activeFoodIds = Array.isArray(levelConfig?.foods) && levelConfig.foods.length > 0
+      ? levelConfig.foods
+      : [...new Set(this.laneLayout.map((lane) => lane.desiredType))];
+    this.activeFoodTypes = FOOD_TYPES.filter((food) => activeFoodIds.includes(food.id));
+    if (this.activeFoodTypes.length === 0) {
+      this.activeFoodTypes = [...FOOD_TYPES];
+    }
+
+    const spawnProfile = levelConfig?.spawn || {};
+    this.baseMainSpeed = toFiniteNumber(spawnProfile.baseMainSpeed, this.defaultTuning.baseMainSpeed);
+    this.baseSideSpeed = toFiniteNumber(spawnProfile.baseSideSpeed, this.defaultTuning.baseSideSpeed);
+    this.maxMainSpeed = toFiniteNumber(spawnProfile.maxMainSpeed, this.defaultTuning.maxMainSpeed);
+    this.maxSideSpeed = toFiniteNumber(spawnProfile.maxSideSpeed, this.defaultTuning.maxSideSpeed);
+
+    this.baseSpawnIntervalMs = toFiniteNumber(spawnProfile.baseIntervalMs, this.defaultTuning.baseSpawnIntervalMs);
+    this.minSpawnIntervalMs = toFiniteNumber(spawnProfile.minIntervalMs, this.defaultTuning.minSpawnIntervalMs);
+    this.scoreRampStepPoints = toFiniteNumber(spawnProfile.scoreRampStepPoints, this.defaultTuning.scoreRampStepPoints);
+    this.mainSpeedPerStep = toFiniteNumber(spawnProfile.mainSpeedPerStep, this.defaultTuning.mainSpeedPerStep);
+    this.sideSpeedPerStep = toFiniteNumber(spawnProfile.sideSpeedPerStep, this.defaultTuning.sideSpeedPerStep);
+    this.spawnIntervalDecreasePerStepMs = toFiniteNumber(
+      spawnProfile.spawnIntervalDecreasePerStepMs,
+      this.defaultTuning.spawnIntervalDecreasePerStepMs
+    );
+
+    this.baseSpawnIntervalMs = Math.max(100, this.baseSpawnIntervalMs);
+    this.minSpawnIntervalMs = Phaser.Math.Clamp(this.minSpawnIntervalMs, 60, this.baseSpawnIntervalMs);
+  }
+
+  applyLayoutFamilyBehavior(layoutFamily) {
+    this.directLaneSpawn = layoutFamily === 'v_swap';
+    this.layoutUsesMainBelt = !this.directLaneSpawn;
+    this.showTransferClaws = this.layoutUsesMainBelt;
+  }
+
+  shouldEnforceCampaignSpacing(levelConfig) {
+    const levelIndex = Number(levelConfig?.index);
+    return this.layoutUsesMainBelt
+      && Number.isFinite(levelIndex)
+      && levelIndex >= SPACING_RULE_LEVEL_START
+      && levelIndex <= SPACING_RULE_LEVEL_END;
+  }
+
+  enforceCampaignSpacing(laneLayout) {
+    if (!Array.isArray(laneLayout)) {
+      return [];
+    }
+
+    // Lock lane intake/chest distances to level-1 spacing for campaign levels 6-12.
+    return laneLayout.map((lane) => ({
+      ...lane,
+      intakeX: this.mainX + lane.direction * SIDE_BELT_INTAKE_OFFSET,
+      chestX: lane.endX + lane.direction * STANDARD_CHEST_OFFSET_X
+    }));
+  }
+
+  applyLayoutFamilyPreset(laneLayout, layoutFamily) {
+    if (!Array.isArray(laneLayout) || laneLayout.length === 0) {
+      return [];
+    }
+
+    const byId = laneLayout.reduce((acc, lane) => {
+      acc[lane.id] = lane;
+      return acc;
+    }, {});
+
+    const patchLane = (laneId, patch) => {
+      if (!byId[laneId]) {
+        return;
+      }
+
+      Object.assign(byId[laneId], patch);
+    };
+
+    if (layoutFamily === 'e_shape') {
+      const sorted = [...laneLayout].sort((a, b) => a.y - b.y);
+      return sorted.map((lane, index) => ({
+        ...lane,
+        direction: 1,
+        y: 240 + index * 140,
+        endX: 1070,
+        chestX: 1170
+      }));
+    }
+
+    if (layoutFamily === 'reverse_e_shape') {
+      const sorted = [...laneLayout].sort((a, b) => a.y - b.y);
+      return sorted.map((lane, index) => ({
+        ...lane,
+        direction: -1,
+        y: 240 + index * 140,
+        endX: 210,
+        chestX: 110
+      }));
+    }
+
+    if (layoutFamily === 'v_shape') {
+      const sorted = [...laneLayout].sort((a, b) => a.y - b.y);
+      return sorted.map((lane, index) => ({
+        ...lane,
+        y: 250 + index * 160,
+        direction: index % 2 === 0 ? -1 : 1,
+        endX: index % 2 === 0 ? 190 : 1090,
+        chestX: index % 2 === 0 ? 110 : 1170
+      }));
+    }
+
+    if (layoutFamily === 'y_shape') {
+      patchLane('mid_left', {
+        y: 270,
+        direction: -1,
+        intakeX: this.mainX - SIDE_BELT_INTAKE_OFFSET,
+        endX: 220,
+        chestX: 110
+      });
+      patchLane('mid_right', {
+        y: 270,
+        direction: 1,
+        intakeX: this.mainX + SIDE_BELT_INTAKE_OFFSET,
+        endX: 1060,
+        chestX: 1170
+      });
+      patchLane('bot_left', {
+        y: 500,
+        direction: -1,
+        intakeX: this.mainX - SIDE_BELT_INTAKE_OFFSET,
+        endX: 240,
+        chestX: 110
+      });
+      patchLane('bot_right', {
+        y: 500,
+        direction: 1,
+        intakeX: this.mainX + SIDE_BELT_INTAKE_OFFSET,
+        endX: 1040,
+        chestX: 1170
+      });
+      return laneLayout;
+    }
+
+    if (layoutFamily === 'm_shape') {
+      patchLane('mid_left', {
+        y: 230,
+        direction: -1,
+        intakeX: this.mainX - SIDE_BELT_INTAKE_OFFSET,
+        endX: 250,
+        chestX: 110
+      });
+      patchLane('mid_right', {
+        y: 230,
+        direction: 1,
+        intakeX: this.mainX + SIDE_BELT_INTAKE_OFFSET,
+        endX: 1030,
+        chestX: 1170
+      });
+      patchLane('bot_left', { y: 500, direction: -1, intakeX: 560, endX: 210, chestX: 110 });
+      patchLane('bot_right', { y: 500, direction: 1, intakeX: 720, endX: 1070, chestX: 1170 });
+      return laneLayout;
+    }
+
+    if (layoutFamily === 'n_shape') {
+      patchLane('mid_left', { y: 220, direction: -1, intakeX: 560, endX: 220, chestX: 110 });
+      patchLane('mid_right', { y: 340, direction: 1, intakeX: 700, endX: 1060, chestX: 1170 });
+      patchLane('bot_left', { y: 460, direction: -1, intakeX: 600, endX: 210, chestX: 110 });
+      patchLane('bot_right', { y: 580, direction: 1, intakeX: 760, endX: 1080, chestX: 1170 });
+      return laneLayout;
+    }
+
+    if (layoutFamily === 'k_shape') {
+      patchLane('mid_left', {
+        y: 250,
+        direction: -1,
+        intakeX: this.mainX - SIDE_BELT_INTAKE_OFFSET,
+        endX: 220,
+        chestX: 110
+      });
+      patchLane('mid_right', { y: 250, direction: 1, intakeX: 700, endX: 1040, chestX: 1170 });
+      patchLane('bot_left', { y: 430, direction: -1, intakeX: 560, endX: 210, chestX: 110 });
+      patchLane('bot_right', { y: 530, direction: 1, intakeX: 760, endX: 1090, chestX: 1170 });
+      return laneLayout;
+    }
+
+    if (layoutFamily === 'v_swap') {
+      patchLane('mid_left', { y: 290, direction: -1, intakeX: this.mainX, endX: 210, chestX: 110 });
+      patchLane('mid_right', { y: 460, direction: 1, intakeX: this.mainX, endX: 1070, chestX: 1170 });
+      patchLane('bot_left', { y: 290, direction: -1, intakeX: this.mainX, endX: 210, chestX: 110 });
+      patchLane('bot_right', { y: 460, direction: 1, intakeX: this.mainX, endX: 1070, chestX: 1170 });
+      return laneLayout;
+    }
+
+    return laneLayout;
+  }
+
+  buildClawRowsFromLaneLayout(laneLayout) {
+    const rowsByY = laneLayout.reduce((acc, lane) => {
+      const key = Number(lane.y);
+      if (!acc[key]) {
+        acc[key] = [];
+      }
+
+      acc[key].push(lane.id);
+      return acc;
+    }, {});
+
+    return Object.entries(rowsByY)
+      .map(([y, laneIds]) => {
+        const rowY = Number(y);
+        const mainPos = Phaser.Math.Clamp(this.getMainPosForWorldY(rowY), 0, this.mainLength);
+        return {
+          y: rowY,
+          mainPos,
+          laneIds: laneIds
+        };
+      })
+      .sort((a, b) => a.mainPos - b.mainPos);
+  }
+
+  resetRunState() {
+    this.spawnTimerMs = 0;
+    this.spawnBlockedThisFrame = false;
+
+    this.mainSpeed = this.baseMainSpeed;
+    this.sideSpeed = this.baseSideSpeed;
+    this.spawnIntervalMs = this.baseSpawnIntervalMs;
+
+    this.nextItemId = 1;
+    this.items = [];
+    this.lanesById = {};
+
+    this.acceptedCount = 0;
+    this.rejectedCount = 0;
+    this.score = 0;
+    this.multiplier = 1;
+    this.comboMilestoneTier = 0;
+
+    this.isGameOver = false;
+    this.levelComplete = false;
+    this.clogTimerSeconds = 0;
+    this.gameOverOverlay = null;
+    this.gameOverText = null;
+    this.levelResultOverlay = null;
+    this.levelResultText = null;
+
+    this.dragContext = null;
+    this.simTimeScale = 1;
+    this.hitStopMs = 0;
+    this.hitStopScale = 1;
+
+    this.coolantFlushHoldMs = 0;
+    this.coolantFlushRampMs = 0;
+    this.smartSortScoreLockMs = 0;
+    this.inserterCalibrationMs = 0;
+    this.chestPriorityMs = 0;
+    this.turboShiftMs = 0;
+    this.comboFurnaceMs = 0;
+    this.comboFurnaceJamPenaltyArmed = false;
+    this.emergencyBrakeMs = 0;
+    this.emergencyBrakePenaltySpawnsRemaining = 0;
+    this.beltRephaseMs = 0;
+    this.predictivePullSpawnsRemaining = 0;
+    this.predictivePullSpawnsCap = 0;
+    this.riskyThroughputMs = 0;
+    this.fragileJackpotNoSlowMoMs = 0;
+
+    this.currentPressure = 0;
+    this.pressureSampleTimerMs = 0;
+    this.highPressureHoldMs = 0;
+    this.cardDraftCooldownMs = 0;
+    this.timeSinceLastDraftMs = 0;
+    this.pendingScoreDraft = false;
+    this.nextCardScoreMilestone = this.cardScoreMilestonePoints;
+
+    this.isDraftActive = false;
+    this.activeDraftTrigger = null;
+    this.cardDraftChoices = [];
+    this.cardDraftEntries = [];
+    this.cardDraftSelectedIndex = 0;
+    this.cardDraftPointerLockMs = 0;
+    this.cardDraftPointerReleaseRequired = false;
+
+    this.musicComboRisePulseMs = 0;
+    this.musicComboDropPulseMs = 0;
+    this.musicBeatTimerMs = 0;
+
+    this.resetChestPriorityCharges();
+  }
+
+  getMainWorldY(mainPos) {
+    return this.mainStartY + this.mainFlowSign * mainPos;
+  }
+
+  getMainPosForWorldY(worldY) {
+    return (worldY - this.mainStartY) * this.mainFlowSign;
   }
 
   preload() {
@@ -1011,7 +1402,7 @@ export default class GameScene extends Phaser.Scene {
 
     const pressure = Phaser.Math.Clamp(this.currentPressure || 0, 0, 1);
     const jammedCount = this.items.reduce((count, item) => count + (item.state === 'jammed' ? 1 : 0), 0);
-    const jamLoad = Phaser.Math.Clamp(jammedCount / Math.max(1, LANE_LAYOUT.length * 2), 0, 1);
+    const jamLoad = Phaser.Math.Clamp(jammedCount / Math.max(1, this.laneLayout.length * 2), 0, 1);
     const comboEnergy = Phaser.Math.Clamp((this.multiplier - 1) / Math.max(1, this.maxMultiplier - 1), 0, 1);
     const comboTier = Phaser.Math.Clamp(this.comboMilestoneTier || Math.floor(this.multiplier / 5), 0, 6);
     const comboRise = Phaser.Math.Clamp(this.musicComboRisePulseMs / 420, 0, 1);
@@ -1124,7 +1515,7 @@ export default class GameScene extends Phaser.Scene {
     this.cardCatalog = this.buildCardCatalog();
 
     this.pressureText = this.add
-      .text(18, 70, '', {
+      .text(18, 98, '', {
         fontFamily: 'Consolas',
         fontSize: '16px',
         color: '#fcd34d'
@@ -1589,12 +1980,12 @@ export default class GameScene extends Phaser.Scene {
       }
     }
 
-    const laneIdByFoodType = LANE_LAYOUT.reduce((acc, lane) => {
+    const laneIdByFoodType = this.laneLayout.reduce((acc, lane) => {
       acc[lane.desiredType] = lane.id;
       return acc;
     }, {});
 
-    const laneBuckets = LANE_LAYOUT.reduce((acc, lane) => {
+    const laneBuckets = this.laneLayout.reduce((acc, lane) => {
       acc[lane.id] = [];
       return acc;
     }, {});
@@ -1639,7 +2030,7 @@ export default class GameScene extends Phaser.Scene {
       laneBuckets[destinationLaneId].push(item);
     }
 
-    for (const laneConfig of LANE_LAYOUT) {
+    for (const laneConfig of this.laneLayout) {
       const lane = this.lanesById[laneConfig.id];
       const bucket = laneBuckets[laneConfig.id];
       if (!lane || !bucket || bucket.length === 0) {
@@ -1739,7 +2130,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   resetChestPriorityCharges() {
-    this.chestPriorityChargesByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
+    this.chestPriorityChargesByLaneId = this.laneLayout.reduce((acc, lane) => {
       acc[lane.id] = 0;
       return acc;
     }, {});
@@ -1758,17 +2149,17 @@ export default class GameScene extends Phaser.Scene {
       return 0;
     }
 
-    return LANE_LAYOUT.length;
+    return this.laneLayout.length;
   }
 
   calculatePressureSnapshot() {
-    const laneCount = Math.max(1, LANE_LAYOUT.length);
+    const laneCount = Math.max(1, this.laneLayout.length);
 
     const mainItemCount = this.items.filter((item) => item.state === 'main' || item.state === 'stopped-main').length;
     const mainCapacity = Math.max(1, Math.floor(this.mainLength / Math.max(1, this.itemSpacing)));
     const mainFill = Phaser.Math.Clamp(mainItemCount / mainCapacity, 0, 1);
 
-    const blockedIntakes = LANE_LAYOUT.reduce((count, lane) => count + (this.canEnterLane(lane.id) ? 0 : 1), 0);
+    const blockedIntakes = this.laneLayout.reduce((count, lane) => count + (this.canEnterLane(lane.id) ? 0 : 1), 0);
     const intakeBlock = Phaser.Math.Clamp(blockedIntakes / laneCount, 0, 1);
 
     const jammedCount = this.items.filter((item) => item.state === 'jammed').length;
@@ -2582,8 +2973,28 @@ export default class GameScene extends Phaser.Scene {
     const baseY = 16;
     const shadow = { offsetX: 0, offsetY: 2, color: '#000000', blur: 8 };
 
-    this.scoreText = this.add
+    this.levelInfoText = this.add
+      .text(640, 694, '', {
+        fontFamily: 'Consolas',
+        fontSize: '20px',
+        color: '#93c5fd',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setDepth(300)
+      .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
+
+    this.quotaText = this.add
       .text(baseX, baseY, '', {
+        fontFamily: 'Consolas',
+        fontSize: '16px',
+        color: '#86efac'
+      })
+      .setDepth(300)
+      .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
+
+    this.scoreText = this.add
+      .text(baseX, baseY + 26, '', {
         fontFamily: 'Consolas',
         fontSize: '20px',
         color: '#e2e8f0'
@@ -2592,7 +3003,7 @@ export default class GameScene extends Phaser.Scene {
       .setShadow(shadow.offsetX, shadow.offsetY, shadow.color, shadow.blur);
 
     this.multiplierText = this.add
-      .text(baseX, baseY + 28, '', {
+      .text(baseX, baseY + 56, '', {
         fontFamily: 'Consolas',
         fontSize: '18px',
         color: '#67e8f9'
@@ -2604,6 +3015,18 @@ export default class GameScene extends Phaser.Scene {
   }
 
   refreshScoreUi() {
+    if (this.levelInfoText) {
+      this.levelInfoText.setText(this.levelName);
+    }
+
+    if (this.quotaText) {
+      if (this.isFiniteLevel) {
+        this.quotaText.setText(`PACKAGED ${this.acceptedCount}/${this.levelQuota}`);
+      } else {
+        this.quotaText.setText(`PACKAGED ${this.acceptedCount}`);
+      }
+    }
+
     if (this.scoreText) {
       this.scoreText.setText(`SCORE ${this.score}`);
     }
@@ -2702,7 +3125,7 @@ export default class GameScene extends Phaser.Scene {
     this.updateHitStop(delta);
     this.updateAudio(delta);
 
-    if (this.isGameOver) {
+    if (this.isGameOver || this.levelComplete) {
       this.updateEffectHud();
       this.updateSceneJuice(delta);
       return;
@@ -2741,16 +3164,93 @@ export default class GameScene extends Phaser.Scene {
       break;
     }
 
-    this.updateMainBelt(dt);
-    this.runClawTransfers();
+    if (this.layoutUsesMainBelt) {
+      this.updateMainBelt(dt);
+      this.runClawTransfers();
+    }
     this.updateSideBelts(dt);
     this.updateConveyorVisuals(dt);
     this.syncItemPositions();
+
+    this.checkForLevelComplete();
+    if (this.levelComplete) {
+      this.updateCardDraftSystem(delta);
+      this.updateSceneJuice(delta);
+      this.updateEffectHud();
+      return;
+    }
 
     this.checkForGameOver(dt);
     this.updateCardDraftSystem(delta);
     this.updateSceneJuice(delta);
     this.updateEffectHud();
+  }
+
+  checkForLevelComplete() {
+    if (!this.isFiniteLevel || this.levelComplete || this.isGameOver) {
+      return;
+    }
+
+    if (!Number.isFinite(this.levelQuota)) {
+      return;
+    }
+
+    if (this.acceptedCount < this.levelQuota) {
+      return;
+    }
+
+    this.triggerLevelComplete();
+  }
+
+  triggerLevelComplete() {
+    if (this.levelComplete) {
+      return;
+    }
+
+    this.levelComplete = true;
+    this.closeCardDraft();
+    this.setSlowMotion(false);
+    this.abortActiveDrag();
+    this.playImpactFx(1.05, 0x22c55e);
+    this.playSfx('combo-tier', 1.2);
+    this.emitShockRing(640, 360, 0x22c55e, 3.4, 280);
+    this.rumble(0.36, 0.22, 180);
+
+    this.levelResultOverlay = this.add.rectangle(640, 360, 1280, 720, 0x020617, 0.68).setDepth(380);
+    this.levelResultText = this.add
+      .text(640, 330, `LEVEL CLEAR\n${this.levelName}\nPACKAGED ${this.acceptedCount}/${this.levelQuota}`, {
+        fontFamily: 'Segoe UI',
+        fontSize: '50px',
+        align: 'center',
+        color: '#dcfce7'
+      })
+      .setOrigin(0.5)
+      .setDepth(390)
+      .setShadow(0, 4, '#000000', 12);
+
+    const nextLevelId = getNextCampaignLevelId(this.levelId);
+    const subText = nextLevelId
+      ? `Next: ${nextLevelId} (loading...)`
+      : 'Campaign complete. Returning to level chooser...';
+
+    this.add
+      .text(640, 456, subText, {
+        fontFamily: 'Consolas',
+        fontSize: '24px',
+        align: 'center',
+        color: '#93c5fd'
+      })
+      .setOrigin(0.5)
+      .setDepth(391);
+
+    this.time.delayedCall(1900, () => {
+      if (nextLevelId) {
+        this.scene.start('GameScene', { levelId: nextLevelId });
+        return;
+      }
+
+      this.scene.start('LevelSelectScene', { selectedLevelId: this.levelId });
+    });
   }
 
   checkForGameOver(dt) {
@@ -2774,9 +3274,13 @@ export default class GameScene extends Phaser.Scene {
       return false;
     }
 
-    const allLaneIntakesBlocked = LANE_LAYOUT.every((laneConfig) => !this.canEnterLane(laneConfig.id));
+    const allLaneIntakesBlocked = this.laneLayout.every((laneConfig) => !this.canEnterLane(laneConfig.id));
     if (!allLaneIntakesBlocked) {
       return false;
+    }
+
+    if (this.directLaneSpawn) {
+      return true;
     }
 
     const mainIsStuck = this.items.some((item) => item.state === 'stopped-main');
@@ -2798,13 +3302,11 @@ export default class GameScene extends Phaser.Scene {
     this.emitShockRing(640, 360, 0xef4444, 3.8, 350);
     this.rumble(0.7, 0.5, 260);
 
-    this.input.enabled = false;
-
     this.gameOverOverlay = this.add.rectangle(640, 360, 1280, 720, 0x020617, 0.72).setDepth(380);
     this.gameOverText = this.add
-      .text(640, 330, `SYSTEM CLOGGED\nSCORE ${this.score}`, {
+      .text(640, 322, `SYSTEM CLOGGED\n${this.levelName}\nSCORE ${this.score}`, {
         fontFamily: 'Segoe UI',
-        fontSize: '54px',
+        fontSize: '48px',
         align: 'center',
         color: '#e2e8f0'
       })
@@ -2819,31 +3321,68 @@ export default class GameScene extends Phaser.Scene {
       duration: 240,
       ease: 'Quad.Out'
     });
+
+    this.add
+      .text(640, 450, 'Returning to level chooser...', {
+        fontFamily: 'Consolas',
+        fontSize: '24px',
+        align: 'center',
+        color: '#93c5fd'
+      })
+      .setOrigin(0.5)
+      .setDepth(391);
+
+    this.time.delayedCall(1900, () => {
+      this.scene.start('LevelSelectScene', { selectedLevelId: this.levelId });
+    });
   }
 
   createFactoryVisuals() {
-    this.mainBeltBody = this.add
-      .rectangle(this.mainX, 360, MAIN_BELT_WIDTH, MAIN_BELT_HEIGHT, 0x1e293b, 1)
-      .setStrokeStyle(2, 0x475569, 1)
-      .setDepth(1);
-    this.mainBeltLines = this.add.graphics().setDepth(2);
-    this.mainBeltLineConfig = {
-      x: this.mainX,
-      y: 360,
-      width: MAIN_BELT_WIDTH,
-      height: MAIN_BELT_HEIGHT,
-      orientation: 'vertical',
-      spacing: 20,
-      margin: 8,
-      offset: 0
-    };
-    drawConveyorLines(this.mainBeltLines, this.mainBeltLineConfig);
+    if (this.layoutDecorationGraphics?.active) {
+      this.layoutDecorationGraphics.destroy();
+    }
+
+    if (this.layoutUsesMainBelt) {
+      this.mainBeltBody = this.add
+        .rectangle(this.mainX, 360, MAIN_BELT_WIDTH, MAIN_BELT_HEIGHT, 0x1e293b, 1)
+        .setStrokeStyle(2, 0x475569, 1)
+        .setDepth(1);
+      this.mainBeltLines = this.add.graphics().setDepth(2);
+      this.mainBeltLineConfig = {
+        x: this.mainX,
+        y: 360,
+        width: MAIN_BELT_WIDTH,
+        height: MAIN_BELT_HEIGHT,
+        orientation: 'vertical',
+        spacing: 20,
+        margin: 8,
+        offset: 0
+      };
+      drawConveyorLines(this.mainBeltLines, this.mainBeltLineConfig);
+    } else {
+      this.mainBeltBody = null;
+      this.mainBeltLines = null;
+      this.mainBeltLineConfig = null;
+
+      if (this.levelLayoutFamily === 'v_swap') {
+        this.layoutDecorationGraphics = this.add.graphics().setDepth(0);
+        this.layoutDecorationGraphics.lineStyle(16, 0x1e293b, 0.88);
+        this.layoutDecorationGraphics.lineBetween(this.mainX, 156, 402, 290);
+        this.layoutDecorationGraphics.lineBetween(this.mainX, 156, 878, 460);
+        this.layoutDecorationGraphics.lineStyle(2, 0x475569, 1);
+        this.layoutDecorationGraphics.lineBetween(this.mainX, 156, 402, 290);
+        this.layoutDecorationGraphics.lineBetween(this.mainX, 156, 878, 460);
+      }
+    }
 
     const hasChestSprites = this.textures.exists(CHEST_CLOSED_KEY) && this.textures.exists(CHEST_OPENED_KEY);
 
-    LANE_LAYOUT.forEach((laneConfig) => {
+    this.laneLayout.forEach((laneConfig) => {
       const laneColor = this.foodTypeById[laneConfig.desiredType].color;
-      const intakeX = this.mainX + laneConfig.direction * SIDE_BELT_INTAKE_OFFSET;
+      const hasCustomIntake = Number.isFinite(laneConfig.intakeX);
+      const intakeX = hasCustomIntake
+        ? laneConfig.intakeX
+        : this.mainX + laneConfig.direction * SIDE_BELT_INTAKE_OFFSET;
       const laneWidth = Math.abs(intakeX - laneConfig.endX);
       const laneCenterX = (intakeX + laneConfig.endX) * 0.5;
 
@@ -2903,21 +3442,24 @@ export default class GameScene extends Phaser.Scene {
         .setDepth(8)
         .setShadow(0, 2, '#000000', 8);
 
-      const clawX = this.mainX + laneConfig.direction * CLAW_OFFSET_X;
-
       const clawBaseAngle = laneConfig.direction > 0 ? 0 : 180;
-      const clawContainer = this.add.container(clawX, laneConfig.y).setDepth(9);
-      clawContainer.setAngle(clawBaseAngle);
+      let clawContainer = null;
+      if (this.showTransferClaws) {
+        // Keep transfer claws anchored to the main splitter so all layout families stay aligned.
+        const clawX = this.mainX + laneConfig.direction * CLAW_OFFSET_X;
+        clawContainer = this.add.container(clawX, laneConfig.y).setDepth(9);
+        clawContainer.setAngle(clawBaseAngle);
 
-      const clawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x0f172a, 1).setStrokeStyle(2, laneColor, 1);
-      const clawGraphics = this.add.graphics();
-      clawGraphics.lineStyle(4, 0x94a3b8, 1);
-      clawGraphics.lineBetween(0, 0, -CLAW_ARM_LENGTH, 0);
-      clawGraphics.lineStyle(4, laneColor, 1);
-      clawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, -CLAW_JAW_SPREAD);
-      clawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, CLAW_JAW_SPREAD);
+        const clawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x0f172a, 1).setStrokeStyle(2, laneColor, 1);
+        const clawGraphics = this.add.graphics();
+        clawGraphics.lineStyle(4, 0x94a3b8, 1);
+        clawGraphics.lineBetween(0, 0, -CLAW_ARM_LENGTH, 0);
+        clawGraphics.lineStyle(4, laneColor, 1);
+        clawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, -CLAW_JAW_SPREAD);
+        clawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, CLAW_JAW_SPREAD);
 
-      clawContainer.add([clawGraphics, clawBase]);
+        clawContainer.add([clawGraphics, clawBase]);
+      }
 
       this.lanesById[laneConfig.id] = {
         ...laneConfig,
@@ -2944,7 +3486,7 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
-    const jammedByLaneId = LANE_LAYOUT.reduce((acc, lane) => {
+    const jammedByLaneId = this.laneLayout.reduce((acc, lane) => {
       acc[lane.id] = false;
       return acc;
     }, {});
@@ -2956,7 +3498,7 @@ export default class GameScene extends Phaser.Scene {
 
     if (this.mainBeltLines && this.mainBeltLineConfig) {
       const spacing = this.mainBeltLineConfig.spacing;
-      this.mainBeltLineConfig.offset = (this.mainBeltLineConfig.offset + this.mainSpeed * dt) % spacing;
+      this.mainBeltLineConfig.offset = (this.mainBeltLineConfig.offset + this.mainSpeed * dt * this.mainFlowSign) % spacing;
       this.mainBeltLines.clear();
       drawConveyorLines(this.mainBeltLines, this.mainBeltLineConfig);
       this.mainBeltLines.setAlpha(0.74);
@@ -3050,6 +3592,20 @@ export default class GameScene extends Phaser.Scene {
   }
 
   spawnFoodIfSpace() {
+    if (this.directLaneSpawn) {
+      const enterableLaneIds = this.laneLayout
+        .map((laneConfig) => laneConfig.id)
+        .filter((laneId) => this.canEnterLane(laneId));
+
+      if (enterableLaneIds.length === 0) {
+        return false;
+      }
+
+      const laneId = Phaser.Utils.Array.GetRandom(enterableLaneIds);
+      this.spawnFood(laneId);
+      return true;
+    }
+
     const closestToEntry = this.getClosestMainPosToEntry();
     if (closestToEntry !== null && closestToEntry < this.itemSpacing) {
       return false;
@@ -3059,9 +3615,13 @@ export default class GameScene extends Phaser.Scene {
     return true;
   }
 
-  spawnFood() {
-    const food = Phaser.Utils.Array.GetRandom(FOOD_TYPES);
+  spawnFood(spawnLaneId = null) {
+    const foodPool = this.activeFoodTypes?.length > 0 ? this.activeFoodTypes : FOOD_TYPES;
+    const food = Phaser.Utils.Array.GetRandom(foodPool);
     const itemId = this.nextItemId;
+    const spawnLane = spawnLaneId ? this.lanesById[spawnLaneId] : null;
+    const spawnX = spawnLane ? spawnLane.intakeX : this.mainX;
+    const spawnY = spawnLane ? spawnLane.y : this.mainStartY;
 
     const textureKeys = this.textureKeysByFoodId[food.id] || [];
     let itemVisual;
@@ -3078,7 +3638,7 @@ export default class GameScene extends Phaser.Scene {
       itemVisual = this.add.rectangle(0, 0, FOOD_RENDER_SIZE, FOOD_RENDER_SIZE, food.color, 1).setStrokeStyle(1, 0x0f172a, 1);
     }
 
-    const container = this.add.container(this.mainX, this.mainStartY, [itemVisual]).setDepth(10);
+    const container = this.add.container(spawnX, spawnY, [itemVisual]).setDepth(10);
     container.setAlpha(0);
     container.setScale(0.18);
     container.setAngle(Phaser.Math.Between(-12, 12));
@@ -3092,7 +3652,7 @@ export default class GameScene extends Phaser.Scene {
       ease: 'Back.Out'
     });
     const grabSize = FOOD_RENDER_SIZE * 1.15;
-    const grabHandle = this.add.zone(this.mainX, this.mainStartY, grabSize, grabSize).setDepth(11);
+    const grabHandle = this.add.zone(spawnX, spawnY, grabSize, grabSize).setDepth(11);
     grabHandle.setInteractive({ useHandCursor: true });
     this.input.setDraggable(grabHandle);
     grabHandle.setData('itemId', itemId);
@@ -3116,12 +3676,12 @@ export default class GameScene extends Phaser.Scene {
     const item = {
       id: itemId,
       type: food.id,
-      x: this.mainX,
-      y: this.mainStartY,
+      x: spawnX,
+      y: spawnY,
       mainPos: 0,
       lanePos: 0,
-      state: 'main',
-      laneId: null,
+      state: spawnLane ? 'side' : 'main',
+      laneId: spawnLane ? spawnLane.id : null,
       motionLock: false,
       scoreScale: itemScoreScale,
       predictivePullBoosted,
@@ -3133,7 +3693,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.items.push(item);
     this.emitSpawnParticles(item);
-    this.emitTransferParticles(this.mainX, this.mainStartY, food.color, 6);
+    this.emitTransferParticles(spawnX, spawnY, food.color, 6);
 
     this.nextItemId += 1;
   }
@@ -3243,7 +3803,7 @@ export default class GameScene extends Phaser.Scene {
     if (slot.state === 'main' || slot.state === 'stopped-main') {
       return {
         x: this.mainX,
-        y: this.mainStartY + slot.mainPos
+        y: this.getMainWorldY(slot.mainPos)
       };
     }
 
@@ -3286,7 +3846,7 @@ export default class GameScene extends Phaser.Scene {
     let selectedLane = null;
     let selectedScore = Number.POSITIVE_INFINITY;
 
-    for (const laneConfig of LANE_LAYOUT) {
+    for (const laneConfig of this.laneLayout) {
       const lane = this.lanesById[laneConfig.id];
       const yDist = Math.abs(worldY - lane.y);
       if (yDist > yTolerance) {
@@ -3709,7 +4269,12 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
-    const laneIds = LANE_LAYOUT.map((laneConfig) => laneConfig.id);
+    const rows = this.clawRows;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return;
+    }
+
+    const laneIds = this.laneLayout.map((laneConfig) => laneConfig.id);
     const laneFillCount = laneIds.reduce((acc, laneId) => {
       acc[laneId] = 0;
       return acc;
@@ -3798,42 +4363,29 @@ export default class GameScene extends Phaser.Scene {
       return candidate;
     };
 
-    // Row 0: pick the emptiest *enterable* side belt across ALL 4 lanes.
-    // If the emptiest is a bottom lane, the item continues straight to row 1.
-    if (CLAW_ROWS.length >= 1) {
-      const row = CLAW_ROWS[0];
-      const rowPos = row.y - this.mainStartY;
-      const nextRowPos = CLAW_ROWS.length >= 2 ? CLAW_ROWS[1].y - this.mainStartY : this.mainLength;
-
-      const candidate = findCandidateNearRow(rowPos, nextRowPos);
-
-      if (candidate) {
-        const routeAssistActive = this.inserterCalibrationMs > 0 || candidate.predictivePullBoosted;
-        const predictiveBias = candidate.predictivePullBoosted ? this.predictivePullBiasWeight : 0;
-        const bestOverall = pickBalancedLane(laneIds, candidate.type, predictiveBias, routeAssistActive);
-        if (bestOverall === row.leftLaneId || bestOverall === row.rightLaneId) {
-          candidate.mainPos = Math.min(candidate.mainPos, rowPos);
-          this.transferToLane(candidate, bestOverall);
-        }
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (!row || !Array.isArray(row.laneIds) || row.laneIds.length === 0) {
+        continue;
       }
-    }
 
-    // Row 1: pick the emptiest *enterable* bottom belt.
-    if (CLAW_ROWS.length >= 2) {
-      const row = CLAW_ROWS[1];
-      const rowPos = row.y - this.mainStartY;
-
-      const candidate = findCandidateNearRow(rowPos);
-
-      if (candidate) {
-        const routeAssistActive = this.inserterCalibrationMs > 0 || candidate.predictivePullBoosted;
-        const predictiveBias = candidate.predictivePullBoosted ? this.predictivePullBiasWeight : 0;
-        const bestBottom = pickBalancedLane([row.leftLaneId, row.rightLaneId], candidate.type, predictiveBias, routeAssistActive);
-        if (bestBottom) {
-          candidate.mainPos = Math.min(candidate.mainPos, rowPos);
-          this.transferToLane(candidate, bestBottom);
-        }
+      const nextRowPos = i + 1 < rows.length ? rows[i + 1].mainPos : null;
+      const candidate = findCandidateNearRow(row.mainPos, nextRowPos);
+      if (!candidate) {
+        continue;
       }
+
+      const routeAssistActive = this.inserterCalibrationMs > 0 || candidate.predictivePullBoosted;
+      const predictiveBias = candidate.predictivePullBoosted ? this.predictivePullBiasWeight : 0;
+
+      const candidateLaneIds = i === 0 && rows.length > 1 ? laneIds : row.laneIds;
+      const bestLane = pickBalancedLane(candidateLaneIds, candidate.type, predictiveBias, routeAssistActive);
+      if (!bestLane || !row.laneIds.includes(bestLane)) {
+        continue;
+      }
+
+      candidate.mainPos = Math.min(candidate.mainPos, row.mainPos);
+      this.transferToLane(candidate, bestLane);
     }
   }
 
@@ -3854,7 +4406,7 @@ export default class GameScene extends Phaser.Scene {
     const lane = this.lanesById[laneId];
 
     const startX = this.mainX;
-    const startY = this.mainStartY + item.mainPos;
+    const startY = this.getMainWorldY(item.mainPos);
     const destinationX = lane.intakeX;
     const destinationY = lane.y;
 
@@ -4030,6 +4582,7 @@ export default class GameScene extends Phaser.Scene {
 
     const finalizeAccept = () => {
       this.acceptedCount += 1;
+      this.refreshScoreUi();
       if (awardScore) {
         this.handleComboConsume(item);
       }
@@ -4160,7 +4713,7 @@ export default class GameScene extends Phaser.Scene {
     const sideSpacing = this.getActiveSideSpacing();
     const chestPriorityActive = this.chestPriorityMs > 0;
 
-    for (const laneConfig of LANE_LAYOUT) {
+    for (const laneConfig of this.laneLayout) {
       const lane = this.lanesById[laneConfig.id];
       const laneItems = this.items
         .filter((item) => item.laneId === lane.id && (item.state === 'side' || item.state === 'jammed'))
@@ -4325,7 +4878,7 @@ export default class GameScene extends Phaser.Scene {
 
       if (item.state === 'main' || item.state === 'stopped-main') {
         item.x = this.mainX;
-        item.y = this.mainStartY + item.mainPos;
+        item.y = this.getMainWorldY(item.mainPos);
       } else {
         const lane = this.lanesById[item.laneId];
         item.x = lane.intakeX + lane.direction * item.lanePos;
