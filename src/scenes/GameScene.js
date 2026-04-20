@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { DEFAULT_LEVEL_ID, getLevelById, getNextCampaignLevelId } from '../data/levels';
+import { DEBUG_LEVEL_ID, DEFAULT_LEVEL_ID, getLevelById, getNextCampaignLevelId } from '../data/levels';
 import { markCampaignLevelCompleted } from '../data/campaignProgress';
 import assemblyLineShuffleUrl from '../../assets/audio/music/The_Assembly_Line_Shuffle.mp3';
 import bannersOverPeakUrl from '../../assets/audio/music/Banners_Over_the_Peak.mp3';
@@ -8,6 +8,31 @@ import ratioedInTheLobbyUrl from '../../assets/audio/music/Ratioed_In_The_Lobby.
 const MAX_GAMEPLAY_SPRITES_PER_TYPE = 24;
 const FOOD_RENDER_SIZE = 54;
 const FOOD_SPACING_PADDING = 12;
+const JAM_BEETLE_RENDER_SIZE = 58;
+const JAM_BEETLE_TYPE_ID = 'jam_beetle';
+const JAM_BEETLE_COLOR = 0xfb7185;
+const JAM_BEETLE_ANIM_KEY = 'jam_beetle_walk';
+const JAM_BEETLE_TAPS_TO_SPLAT = 3;
+const JAM_BEETLE_SPAWN_SCALE = 0.62;
+const JAM_BEETLE_TAP_MAX_MOVEMENT = 12;
+const JAM_BEETLE_GRAB_MIN_MOVEMENT = 20;
+const JAM_BEETLE_FLICK_MIN_DISTANCE = 26;
+const JAM_BEETLE_FLICK_MIN_SPEED = 540;
+const JAM_BEETLE_TOSS_MIN_SPEED = 180;
+const JAM_BEETLE_TOSS_MAX_SPEED = 420;
+const JAM_BEETLE_TOSS_TOTAL_DURATION_MS = 750;
+
+const DRONE_SABOTAGE_MIN_COOLDOWN_MS = 9500;
+const DRONE_SABOTAGE_MAX_COOLDOWN_MS = 15500;
+const DRONE_SABOTAGE_RETRY_MIN_MS = 1400;
+const DRONE_SABOTAGE_RETRY_MAX_MS = 3000;
+const DRONE_WARNING_DURATION_MS = 1000;
+const DRONE_FLIGHT_SPEED_PX_PER_SEC = 460;
+const DRONE_FLIGHT_MIN_DURATION_MS = 420;
+const DRONE_FLIGHT_MAX_DURATION_MS = 1960;
+const DRONE_PICKUP_HOLD_MS = 120;
+const DRONE_DROP_HOLD_MS = 95;
+const DRONE_CARRY_OFFSET_Y = 20;
 
 const MAIN_BELT_WIDTH = 74;
 const MAIN_BELT_HEIGHT = 560;
@@ -71,6 +96,8 @@ const SPRITE_URL_GLOBS = {
   greens: import.meta.glob('../../assets/sprites/greens/*.png', { eager: true, import: 'default' })
 };
 
+const JAM_BEETLE_SPRITE_GLOB = import.meta.glob('../../assets/sprites/Beetle_*.png', { eager: true, import: 'default' });
+
 const CHEST_SPRITE_GLOB = import.meta.glob('../../assets/sprites/chest/*.png', { eager: true, import: 'default' });
 const CHEST_CLOSED_KEY = 'chest_closed';
 const CHEST_OPENED_KEY = 'chest_opened';
@@ -82,6 +109,7 @@ function findFirstMatchUrl(spriteGlob, matcher) {
 
 const CHEST_CLOSED_URL = findFirstMatchUrl(CHEST_SPRITE_GLOB, /closed\.png$/i);
 const CHEST_OPENED_URL = findFirstMatchUrl(CHEST_SPRITE_GLOB, /opened\.png$/i);
+const JAM_BEETLE_SPRITE_URLS = collectSpriteUrls(JAM_BEETLE_SPRITE_GLOB, Number.POSITIVE_INFINITY);
 
 function collectSpriteUrls(spriteGlob, maxCount = MAX_GAMEPLAY_SPRITES_PER_TYPE) {
   return Object.entries(spriteGlob)
@@ -251,6 +279,7 @@ export default class GameScene extends Phaser.Scene {
     this.activeFoodTypes = [...FOOD_TYPES];
     this.textureKeysByFoodId = {};
     this.chestBubbleTextureKeysByFoodId = {};
+    this.jamBeetleTextureKeys = [];
 
     this.acceptedCount = 0;
     this.rejectedCount = 0;
@@ -266,6 +295,14 @@ export default class GameScene extends Phaser.Scene {
     this.spawnParticles = null;
     this.jamParticles = null;
     this.transferParticles = null;
+    this.bloodParticles = null;
+
+    this.droneActive = false;
+    this.droneContainer = null;
+    this.droneRotorTweens = [];
+    this.droneCarryItemId = null;
+    this.droneSabotageTimerMs = 0;
+    this.droneRunToken = 0;
 
     this.isGameOver = false;
     this.isPaused = false;
@@ -854,6 +891,8 @@ export default class GameScene extends Phaser.Scene {
   }
 
   resetRunState() {
+    this.cleanupDroneSabotage(true);
+
     this.spawnTimerMs = 0;
     this.spawnBlockedThisFrame = false;
 
@@ -935,6 +974,12 @@ export default class GameScene extends Phaser.Scene {
     this.levelClearMusicActive = false;
     this.bgmSessionToken += 1;
 
+    if (this.isDroneSabotageLevelEnabled()) {
+      this.resetDroneSabotageTimer();
+    } else {
+      this.droneSabotageTimerMs = Number.POSITIVE_INFINITY;
+    }
+
     this.resetChestPriorityCharges();
   }
 
@@ -991,6 +1036,16 @@ export default class GameScene extends Phaser.Scene {
         textureKeyByUrl.set(url, textureKey);
       });
     });
+
+    this.jamBeetleTextureKeys = [];
+    JAM_BEETLE_SPRITE_URLS.forEach((url, index) => {
+      const textureKey = `jam_beetle_${index}`;
+      if (!this.textures.exists(textureKey)) {
+        this.load.image(textureKey, url);
+      }
+      this.jamBeetleTextureKeys.push(textureKey);
+      textureKeyByUrl.set(url, textureKey);
+    });
   }
 
   create() {
@@ -1001,6 +1056,7 @@ export default class GameScene extends Phaser.Scene {
     this.createPauseUi();
     this.createCardSystem();
     this.createParticles();
+    this.ensureJamBeetleAnimation();
     this.setupGrabControls();
     this.game.events.emit('scene-ready:GameScene', {
       loadingToken: this.loadingToken,
@@ -1214,6 +1270,7 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBody = null;
     this.pauseButtonBars = [];
     this.pauseMenuContainer = null;
+    this.cleanupDroneSabotage(true);
 
     this.stopBgmSource();
     this.bgmPlaybackState = 'idle';
@@ -3839,6 +3896,20 @@ export default class GameScene extends Phaser.Scene {
         blendMode: 'ADD'
       })
       .setDepth(59);
+
+    this.bloodParticles = this.add
+      .particles(0, 0, particleTextureKey, {
+        frequency: -1,
+        quantity: 0,
+        lifespan: { min: 280, max: 540 },
+        speed: { min: 120, max: 360 },
+        angle: { min: 0, max: 360 },
+        gravityY: 640,
+        scale: { start: 0.72, end: 0.08 },
+        alpha: { start: 0.95, end: 0 },
+        blendMode: 'NORMAL'
+      })
+      .setDepth(62);
   }
 
   emitChestConsumeParticles(item, lane) {
@@ -3866,6 +3937,17 @@ export default class GameScene extends Phaser.Scene {
 
     this.jamParticles.setParticleTint(0xef4444, 0x94a3b8, item.baseColor ?? 0xffffff);
     this.jamParticles.explode(20, item.x, item.y);
+  }
+
+  emitBloodParticles(x, y, intensity = 1) {
+    if (!this.bloodParticles) {
+      return;
+    }
+
+    const clampedIntensity = Phaser.Math.Clamp(intensity, 0.6, 2.4);
+    const quantity = Math.round(18 * clampedIntensity);
+    this.bloodParticles.setParticleTint(0x7f1d1d, 0x991b1b, 0xb91c1c, 0xef4444);
+    this.bloodParticles.explode(quantity, x, y);
   }
 
   emitTransferParticles(x, y, color, quantity = 10) {
@@ -4598,6 +4680,7 @@ export default class GameScene extends Phaser.Scene {
     this.updateSideBelts(dt);
     this.updateConveyorVisuals(dt);
     this.syncItemPositions();
+    this.updateDroneSabotage(scaledDeltaMs);
 
     this.checkForLevelComplete();
     if (this.levelComplete) {
@@ -4641,6 +4724,7 @@ export default class GameScene extends Phaser.Scene {
     this.closeCardDraft();
     this.setSlowMotion(false);
     this.abortActiveDrag();
+    this.cleanupDroneSabotage(true);
     this.playImpactFx(1.05, 0x22c55e);
     this.playSfx('combo-tier', 1.2);
     this.emitShockRing(640, 360, 0x22c55e, 3.4, 280);
@@ -4920,6 +5004,7 @@ export default class GameScene extends Phaser.Scene {
     this.closeCardDraft();
     this.setSlowMotion(false);
     this.abortActiveDrag();
+    this.cleanupDroneSabotage(true);
     this.startGameOverMusicTransition();
     this.playImpactFx(1.35, 0xef4444);
     this.playSfx('game-over', 1.2);
@@ -5392,6 +5477,653 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
+  ensureJamBeetleAnimation() {
+    if (this.anims.exists(JAM_BEETLE_ANIM_KEY)) {
+      return;
+    }
+
+    const frameKeys = this.jamBeetleTextureKeys.filter((key) => this.textures.exists(key));
+    if (frameKeys.length < 2) {
+      return;
+    }
+
+    this.anims.create({
+      key: JAM_BEETLE_ANIM_KEY,
+      frames: frameKeys.map((key) => ({ key })),
+      frameRate: 4,
+      repeat: -1
+    });
+  }
+
+  isJamBeetleLevelEnabled() {
+    if (this.levelId === DEBUG_LEVEL_ID) {
+      return true;
+    }
+
+    if (this.levelMode !== 'campaign') {
+      return false;
+    }
+
+    const levelIndex = Number(this.levelConfig?.index);
+    return Number.isFinite(levelIndex) && levelIndex >= 2;
+  }
+
+  shouldSpawnJamBeetle() {
+    if (!this.isJamBeetleLevelEnabled() || this.jamBeetleTextureKeys.length <= 0) {
+      return false;
+    }
+
+    // Use full core category count (carbs/protein/greens/condiments) for stable spawn odds.
+    // This keeps beetles around a 1:4 category ratio regardless of level-specific active foods.
+    const totalCoreFoodCategories = Math.max(1, FOOD_TYPES.length);
+    const baseSpawnChance = 1 / (totalCoreFoodCategories + 1);
+    const tunedSpawnChance = Phaser.Math.Clamp(baseSpawnChance * JAM_BEETLE_SPAWN_SCALE, 0.01, 0.95);
+    return Math.random() < tunedSpawnChance;
+  }
+
+  isDroneSabotageLevelEnabled() {
+    if (this.levelId === DEBUG_LEVEL_ID) {
+      return true;
+    }
+
+    if (this.levelMode !== 'campaign') {
+      return false;
+    }
+
+    const levelIndex = Number(this.levelConfig?.index);
+    return Number.isFinite(levelIndex) && levelIndex >= 3;
+  }
+
+  resetDroneSabotageTimer(minMs = DRONE_SABOTAGE_MIN_COOLDOWN_MS, maxMs = DRONE_SABOTAGE_MAX_COOLDOWN_MS) {
+    this.droneSabotageTimerMs = Phaser.Math.Between(minMs, maxMs);
+  }
+
+  cleanupDroneSabotage(preserveTimer = false) {
+    this.droneRunToken += 1;
+
+    if (this.droneCarryItemId !== null) {
+      const carriedItem = this.getItemById(this.droneCarryItemId);
+      if (carriedItem) {
+        const mainY = this.getMainWorldY(0);
+        carriedItem.state = 'main';
+        carriedItem.laneId = null;
+        carriedItem.mainPos = 0;
+        carriedItem.lanePos = 0;
+        carriedItem.motionLock = false;
+        carriedItem.x = this.mainX;
+        carriedItem.y = mainY;
+        if (carriedItem.container?.active) {
+          carriedItem.container.setPosition(this.mainX, mainY);
+          carriedItem.container.setScale(1);
+          carriedItem.container.setAngle(0);
+          carriedItem.container.setDepth(10);
+        }
+        if (carriedItem.grabHandle?.active) {
+          carriedItem.grabHandle.setPosition(this.mainX, mainY);
+          carriedItem.grabHandle.setDepth(11);
+        }
+        this.ensureGrabHandleReady(carriedItem);
+      }
+    }
+
+    if (Array.isArray(this.droneRotorTweens)) {
+      this.droneRotorTweens.forEach((tween) => {
+        tween?.remove?.();
+      });
+    }
+    this.droneRotorTweens = [];
+
+    if (this.droneContainer?.active) {
+      this.droneContainer.destroy(true);
+    }
+
+    this.droneContainer = null;
+    this.droneCarryItemId = null;
+    this.droneActive = false;
+
+    if (!preserveTimer) {
+      this.droneSabotageTimerMs = 0;
+    }
+  }
+
+  updateDroneSabotage(deltaMs) {
+    if (!this.isDroneSabotageLevelEnabled() || this.droneActive || deltaMs <= 0) {
+      return;
+    }
+
+    this.droneSabotageTimerMs -= deltaMs;
+    if (this.droneSabotageTimerMs > 0) {
+      return;
+    }
+
+    const targetItem = this.pickDroneSabotageTargetItem();
+    if (!targetItem) {
+      this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+      return;
+    }
+
+    const dropPlan = this.pickDroneWrongLaneDrop(targetItem);
+    if (!dropPlan) {
+      this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+      return;
+    }
+
+    this.startDroneSabotageRun(targetItem.id, dropPlan);
+  }
+
+  pickDroneSabotageTargetItem() {
+    const candidates = this.items.filter((item) => {
+      if (!item || item.isJamBeetle || item.state !== 'side' || item.motionLock) {
+        return false;
+      }
+
+      const lane = this.lanesById[item.laneId];
+      if (!lane) {
+        return false;
+      }
+
+      // Only steal foods that are currently in their correct belt.
+      return lane.desiredType === item.type;
+    });
+
+    if (candidates.length <= 0) {
+      return null;
+    }
+
+    return Phaser.Utils.Array.GetRandom(candidates);
+  }
+
+  findFirstFreeLanePosFromStart(laneId, excludedItemId) {
+    const lane = this.lanesById[laneId];
+    if (!lane) {
+      return null;
+    }
+
+    const maxPos = Math.ceil(lane.length);
+    for (let lanePos = 0; lanePos <= maxPos; lanePos += 1) {
+      if (this.isLanePosFree(laneId, lanePos, excludedItemId)) {
+        return lanePos;
+      }
+    }
+
+    return null;
+  }
+
+  pickDroneWrongLaneDrop(item) {
+    if (!item) {
+      return null;
+    }
+
+    const wrongLanes = this.laneLayout
+      .map((laneConfig) => this.lanesById[laneConfig.id])
+      .filter((lane) => lane && lane.desiredType !== item.type);
+
+    if (wrongLanes.length <= 0) {
+      return null;
+    }
+
+    const shuffled = Phaser.Utils.Array.Shuffle([...wrongLanes]);
+    for (const lane of shuffled) {
+      const lanePos = this.findFirstFreeLanePosFromStart(lane.id, item.id);
+      if (lanePos !== null) {
+        return {
+          laneId: lane.id,
+          lanePos
+        };
+      }
+    }
+
+    return null;
+  }
+
+  createDroneVisual() {
+    const container = this.add.container(0, 0).setDepth(247);
+    const shadow = this.add.rectangle(0, 8, 94, 48, 0x020617, 0.36);
+    const body = this.add.rectangle(0, 0, 94, 48, 0x334155, 1).setStrokeStyle(2, 0x94a3b8, 0.95);
+    const innerBody = this.add.rectangle(0, 0, 58, 20, 0x0f172a, 1).setStrokeStyle(1, 0xcbd5e1, 0.9);
+    const accent = this.add.rectangle(0, -12, 42, 4, 0x38bdf8, 0.75);
+
+    container.add([shadow, body, innerBody, accent]);
+
+    const rotorOffsets = [
+      { x: -37, y: -20 },
+      { x: 37, y: -20 },
+      { x: -37, y: 20 },
+      { x: 37, y: 20 }
+    ];
+
+    const rotorTweens = [];
+    rotorOffsets.forEach((offset, index) => {
+      const mount = this.add.circle(offset.x, offset.y, 7, 0x1e293b, 1).setStrokeStyle(1, 0x94a3b8, 0.9);
+      const rotor = this.add.container(offset.x, offset.y);
+      const bladeA = this.add.rectangle(0, 0, 24, 3, 0xe2e8f0, 0.95);
+      const bladeB = this.add.rectangle(0, 0, 24, 3, 0xe2e8f0, 0.95).setAngle(90);
+      const hub = this.add.circle(0, 0, 3, 0x0f172a, 1).setStrokeStyle(1, 0xf8fafc, 0.85);
+      rotor.add([bladeA, bladeB, hub]);
+
+      container.add([mount, rotor]);
+
+      rotorTweens.push(this.tweens.add({
+        targets: rotor,
+        angle: 360,
+        duration: 140 + index * 22,
+        repeat: -1,
+        ease: 'Linear'
+      }));
+    });
+
+    return {
+      container,
+      rotorTweens
+    };
+  }
+
+  getDroneEntryPoint() {
+    const fromLeft = Math.random() < 0.5;
+    return {
+      fromLeft,
+      x: fromLeft ? -150 : 1430,
+      y: Phaser.Math.Between(120, 380)
+    };
+  }
+
+  getDroneExitPoint(fromLeft) {
+    const exitUp = Math.random() < 0.32;
+    if (exitUp) {
+      return {
+        x: Phaser.Math.Between(180, 1100),
+        y: -130
+      };
+    }
+
+    return {
+      x: fromLeft ? 1430 : -150,
+      y: Phaser.Math.Between(110, 390)
+    };
+  }
+
+  showDroneSabotageWarning(targetItem, plannedDrop, onComplete = () => {}) {
+    if (!targetItem) {
+      onComplete();
+      return;
+    }
+
+    const dropLane = this.lanesById[plannedDrop?.laneId];
+    const pickupX = targetItem.x;
+    const pickupY = targetItem.y;
+    const dropX = dropLane ? dropLane.intakeX : this.mainX;
+    const dropY = dropLane ? dropLane.y : this.mainStartY;
+
+    const camera = this.cameras.main;
+    const centerX = camera?.centerX ?? 640;
+    const centerY = camera?.centerY ?? 360;
+
+    const warningText = this.add
+      .text(centerX, centerY, 'DRONE INBOUND', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '56px',
+        color: '#ffe4e6',
+        stroke: '#3f0a10',
+        strokeThickness: 6,
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setDepth(332)
+      .setAlpha(0);
+
+    const warningTint = this.add
+      .rectangle(centerX, centerY, camera?.width ?? 1280, camera?.height ?? 720, 0xef4444, 1)
+      .setDepth(249)
+      .setAlpha(0);
+
+    this.playSfx('claw-move', 0.46);
+    this.emitShockRing(pickupX, pickupY, 0xfca5a5, 1.32, 150);
+    this.emitShockRing(dropX, dropY, 0xfdba74, 1.22, 150);
+    if (dropLane) {
+      this.pulseLaneVisual(dropLane.id, 0.8, true);
+    }
+
+    const fadeInMs = 180;
+    const fadeOutMs = 220;
+    const holdMs = Math.max(0, DRONE_WARNING_DURATION_MS - fadeInMs - fadeOutMs);
+
+    this.tweens.add({
+      targets: warningText,
+      alpha: 0.86,
+      duration: fadeInMs,
+      ease: 'Sine.Out'
+    });
+
+    this.tweens.add({
+      targets: warningTint,
+      alpha: 0.055,
+      duration: fadeInMs,
+      ease: 'Sine.Out'
+    });
+
+    this.time.delayedCall(fadeInMs + holdMs, () => {
+      this.tweens.add({
+        targets: warningText,
+        alpha: 0,
+        duration: fadeOutMs,
+        ease: 'Sine.In',
+        onComplete: () => {
+          warningText.destroy();
+        }
+      });
+
+      this.tweens.add({
+        targets: warningTint,
+        alpha: 0,
+        duration: fadeOutMs,
+        ease: 'Sine.In',
+        onComplete: () => {
+          warningTint.destroy();
+        }
+      });
+    });
+
+    this.time.delayedCall(DRONE_WARNING_DURATION_MS, onComplete);
+  }
+
+  syncDroneCarryItemPosition() {
+    if (!this.droneContainer?.active || this.droneCarryItemId === null) {
+      return;
+    }
+
+    const carriedItem = this.getItemById(this.droneCarryItemId);
+    if (!carriedItem) {
+      return;
+    }
+
+    const targetX = this.droneContainer.x;
+    const targetY = this.droneContainer.y + DRONE_CARRY_OFFSET_Y;
+
+    carriedItem.x = targetX;
+    carriedItem.y = targetY;
+
+    if (carriedItem.container?.active) {
+      carriedItem.container.setPosition(targetX, targetY);
+      carriedItem.container.setDepth(246);
+    }
+
+    if (carriedItem.grabHandle?.active) {
+      carriedItem.grabHandle.setPosition(targetX, targetY);
+      carriedItem.grabHandle.setDepth(247);
+    }
+  }
+
+  flyDroneTo(x, y, onComplete = () => {}) {
+    if (!this.droneContainer?.active) {
+      onComplete();
+      return;
+    }
+
+    const distance = Phaser.Math.Distance.Between(this.droneContainer.x, this.droneContainer.y, x, y);
+    const duration = Phaser.Math.Clamp(
+      (distance / Math.max(1, DRONE_FLIGHT_SPEED_PX_PER_SEC)) * 1000,
+      DRONE_FLIGHT_MIN_DURATION_MS,
+      DRONE_FLIGHT_MAX_DURATION_MS
+    );
+
+    this.tweens.add({
+      targets: this.droneContainer,
+      x,
+      y,
+      duration,
+      ease: 'Sine.InOut',
+      onUpdate: () => {
+        this.syncDroneCarryItemPosition();
+      },
+      onComplete
+    });
+  }
+
+  prepareItemForDronePickup(item) {
+    if (!item) {
+      return;
+    }
+
+    this.tweens.killTweensOf(item.container);
+    item.state = 'drone';
+    item.motionLock = true;
+    item.laneId = null;
+    item.mainPos = 0;
+    item.lanePos = 0;
+    item.holdMainPos = null;
+
+    if (item.grabHandle?.input?.enabled) {
+      item.grabHandle.disableInteractive();
+    }
+  }
+
+  releaseItemFromDrone(item, plannedDrop) {
+    if (!item) {
+      return;
+    }
+
+    let laneId = plannedDrop?.laneId;
+    let lanePos = this.findFirstFreeLanePosFromStart(laneId, item.id);
+
+    if (lanePos === null) {
+      const fallbackDrop = this.pickDroneWrongLaneDrop(item);
+      if (fallbackDrop) {
+        laneId = fallbackDrop.laneId;
+        lanePos = fallbackDrop.lanePos;
+      }
+    }
+
+    const lane = this.lanesById[laneId];
+    if (!lane || lanePos === null) {
+      const mainY = this.getMainWorldY(0);
+      item.state = 'main';
+      item.laneId = null;
+      item.mainPos = 0;
+      item.lanePos = 0;
+      item.motionLock = false;
+      item.x = this.mainX;
+      item.y = mainY;
+    } else {
+      item.state = 'side';
+      item.laneId = lane.id;
+      item.lanePos = lanePos;
+      item.mainPos = 0;
+      item.motionLock = false;
+      item.x = lane.intakeX + lane.direction * lanePos;
+      item.y = lane.y;
+    }
+
+    if (item.container?.active) {
+      item.container.setPosition(item.x, item.y);
+      item.container.setScale(1);
+      item.container.setAngle(0);
+      item.container.setDepth(10);
+    }
+    if (item.grabHandle?.active) {
+      item.grabHandle.setPosition(item.x, item.y);
+      item.grabHandle.setDepth(11);
+    }
+
+    this.clearItemTint(item);
+    this.ensureGrabHandleReady(item);
+    this.emitTransferParticles(item.x, item.y, item.baseColor, 12);
+    this.emitShockRing(item.x, item.y, 0xf97316, 1.7, 170);
+  }
+
+  startDroneSabotageRun(targetItemId, plannedDrop) {
+    if (this.droneActive) {
+      return;
+    }
+
+    const targetItem = this.getItemById(targetItemId);
+    if (!targetItem) {
+      this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+      return;
+    }
+
+    let activeDropPlan = plannedDrop;
+    const preferredLanePos = this.findFirstFreeLanePosFromStart(activeDropPlan?.laneId, targetItem.id);
+    if (activeDropPlan?.laneId && preferredLanePos !== null) {
+      activeDropPlan = {
+        laneId: activeDropPlan.laneId,
+        lanePos: preferredLanePos
+      };
+    } else {
+      activeDropPlan = this.pickDroneWrongLaneDrop(targetItem);
+    }
+
+    if (!activeDropPlan) {
+      this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+      return;
+    }
+
+    const runToken = this.droneRunToken + 1;
+    this.droneRunToken = runToken;
+    this.droneActive = true;
+
+    this.showDroneSabotageWarning(targetItem, activeDropPlan, () => {
+      if (runToken !== this.droneRunToken || !this.droneActive) {
+        return;
+      }
+
+      if (this.isGameOver || this.levelComplete || this.sceneTransitioning) {
+        this.droneActive = false;
+        this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+        return;
+      }
+
+      const currentItem = this.getItemById(targetItemId);
+      const currentLane = this.lanesById[currentItem?.laneId];
+      if (
+        !currentItem
+        || currentItem.isJamBeetle
+        || currentItem.state !== 'side'
+        || currentItem.motionLock
+        || !currentLane
+        || currentLane.desiredType !== currentItem.type
+      ) {
+        this.droneActive = false;
+        this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+        return;
+      }
+
+      const refreshedDrop = this.pickDroneWrongLaneDrop(currentItem);
+      if (refreshedDrop) {
+        activeDropPlan = refreshedDrop;
+      }
+
+      const droneVisual = this.createDroneVisual();
+      this.droneContainer = droneVisual.container;
+      this.droneRotorTweens = droneVisual.rotorTweens;
+
+      const entryPoint = this.getDroneEntryPoint();
+      const exitPoint = this.getDroneExitPoint(entryPoint.fromLeft);
+      const pickupPoint = {
+        x: currentItem.x,
+        y: currentItem.y - 24
+      };
+
+      this.droneContainer.setPosition(entryPoint.x, entryPoint.y);
+      this.droneContainer.setAlpha(0);
+      this.tweens.add({
+        targets: this.droneContainer,
+        alpha: 1,
+        duration: 140,
+        ease: 'Quad.Out'
+      });
+
+      this.flyDroneTo(pickupPoint.x, pickupPoint.y, () => {
+        if (runToken !== this.droneRunToken || !this.droneActive) {
+          return;
+        }
+
+        const latestItem = this.getItemById(targetItemId);
+        const latestLane = this.lanesById[latestItem?.laneId];
+        if (
+          !latestItem
+          || latestItem.isJamBeetle
+          || latestItem.state !== 'side'
+          || latestItem.motionLock
+          || !latestLane
+          || latestLane.desiredType !== latestItem.type
+        ) {
+          this.finishDroneSabotageRun(exitPoint);
+          return;
+        }
+
+        this.prepareItemForDronePickup(latestItem);
+        this.droneCarryItemId = latestItem.id;
+        this.syncDroneCarryItemPosition();
+        this.playSfx('claw-grab', 0.92);
+        this.emitTransferParticles(latestItem.x, latestItem.y, latestItem.baseColor, 10);
+
+        this.time.delayedCall(DRONE_PICKUP_HOLD_MS, () => {
+          if (runToken !== this.droneRunToken || !this.droneActive) {
+            return;
+          }
+
+          const carried = this.getItemById(this.droneCarryItemId);
+          let runtimeDropPlan = activeDropPlan;
+
+          if (carried) {
+            const startFreePos = this.findFirstFreeLanePosFromStart(runtimeDropPlan?.laneId, carried.id);
+            if (runtimeDropPlan?.laneId && startFreePos !== null) {
+              runtimeDropPlan = {
+                laneId: runtimeDropPlan.laneId,
+                lanePos: startFreePos
+              };
+            } else {
+              const fallbackDrop = this.pickDroneWrongLaneDrop(carried);
+              if (fallbackDrop) {
+                runtimeDropPlan = fallbackDrop;
+              }
+            }
+          }
+
+          const lane = this.lanesById[runtimeDropPlan?.laneId];
+          const dropPoint = lane
+            ? { x: lane.intakeX + lane.direction * runtimeDropPlan.lanePos, y: lane.y - 24 }
+            : { x: this.mainX, y: this.mainStartY - 24 };
+
+          this.flyDroneTo(dropPoint.x, dropPoint.y, () => {
+            if (runToken !== this.droneRunToken || !this.droneActive) {
+              return;
+            }
+
+            const carriedAtDrop = this.getItemById(this.droneCarryItemId);
+            if (carriedAtDrop) {
+              this.releaseItemFromDrone(carriedAtDrop, runtimeDropPlan);
+            }
+
+            this.droneCarryItemId = null;
+            this.playSfx('claw-drop', 0.95);
+
+            this.time.delayedCall(DRONE_DROP_HOLD_MS, () => {
+              if (runToken !== this.droneRunToken || !this.droneActive) {
+                return;
+              }
+
+              this.finishDroneSabotageRun(exitPoint);
+            });
+          });
+        });
+      });
+    });
+  }
+
+  finishDroneSabotageRun(exitPoint) {
+    if (!this.droneContainer?.active) {
+      this.cleanupDroneSabotage(true);
+      this.resetDroneSabotageTimer();
+      return;
+    }
+
+    this.flyDroneTo(exitPoint.x, exitPoint.y, () => {
+      this.cleanupDroneSabotage(true);
+      this.resetDroneSabotageTimer();
+    });
+  }
+
   spawnFoodIfSpace() {
     if (this.directLaneSpawn) {
       const enterableLaneIds = this.laneLayout
@@ -5418,25 +6150,45 @@ export default class GameScene extends Phaser.Scene {
 
   spawnFood(spawnLaneId = null) {
     const foodPool = this.activeFoodTypes?.length > 0 ? this.activeFoodTypes : FOOD_TYPES;
-    const food = Phaser.Utils.Array.GetRandom(foodPool);
+    const spawnJamBeetle = this.shouldSpawnJamBeetle();
+    const food = spawnJamBeetle ? null : Phaser.Utils.Array.GetRandom(foodPool);
     const itemId = this.nextItemId;
     const spawnLane = spawnLaneId ? this.lanesById[spawnLaneId] : null;
     const spawnX = spawnLane ? spawnLane.intakeX : this.mainX;
     const spawnY = spawnLane ? spawnLane.y : this.mainStartY;
 
-    const textureKeys = this.textureKeysByFoodId[food.id] || [];
     let itemVisual;
+    let itemType = food?.id || JAM_BEETLE_TYPE_ID;
+    let itemColor = food?.color || JAM_BEETLE_COLOR;
 
-    if (textureKeys.length > 0) {
-      const textureKey = Phaser.Utils.Array.GetRandom(textureKeys);
-      itemVisual = this.add.image(0, 0, textureKey);
+    if (spawnJamBeetle) {
+      const textureKey = this.jamBeetleTextureKeys[0] || null;
+      if (textureKey && this.textures.exists(textureKey)) {
+        itemVisual = this.add.sprite(0, 0, textureKey);
 
-      const maxDim = Math.max(itemVisual.width, itemVisual.height);
-      if (maxDim > 0) {
-        itemVisual.setScale(FOOD_RENDER_SIZE / maxDim);
+        const maxDim = Math.max(itemVisual.width || 1, itemVisual.height || 1);
+        itemVisual.setScale(JAM_BEETLE_RENDER_SIZE / maxDim);
+
+        if (this.anims.exists(JAM_BEETLE_ANIM_KEY)) {
+          itemVisual.play(JAM_BEETLE_ANIM_KEY);
+        }
+      } else {
+        itemVisual = this.add.circle(0, 0, JAM_BEETLE_RENDER_SIZE * 0.4, JAM_BEETLE_COLOR, 1).setStrokeStyle(2, 0x3a1013, 1);
       }
     } else {
-      itemVisual = this.add.rectangle(0, 0, FOOD_RENDER_SIZE, FOOD_RENDER_SIZE, food.color, 1).setStrokeStyle(1, 0x0f172a, 1);
+      const textureKeys = this.textureKeysByFoodId[food.id] || [];
+
+      if (textureKeys.length > 0) {
+        const textureKey = Phaser.Utils.Array.GetRandom(textureKeys);
+        itemVisual = this.add.image(0, 0, textureKey);
+
+        const maxDim = Math.max(itemVisual.width, itemVisual.height);
+        if (maxDim > 0) {
+          itemVisual.setScale(FOOD_RENDER_SIZE / maxDim);
+        }
+      } else {
+        itemVisual = this.add.rectangle(0, 0, FOOD_RENDER_SIZE, FOOD_RENDER_SIZE, food.color, 1).setStrokeStyle(1, 0x0f172a, 1);
+      }
     }
 
     const container = this.add.container(spawnX, spawnY, [itemVisual]).setDepth(10);
@@ -5459,6 +6211,29 @@ export default class GameScene extends Phaser.Scene {
     grabHandle.setData('itemId', itemId);
     grabHandle.input.cursor = 'grab';
 
+    if (spawnJamBeetle) {
+      grabHandle.on('pointerup', (pointer) => {
+        if (this.dragContext?.itemId === itemId) {
+          return;
+        }
+
+        const downX = Number(pointer?.downX);
+        const downY = Number(pointer?.downY);
+        const upX = Number(pointer?.x);
+        const upY = Number(pointer?.y);
+        const moved = Phaser.Math.Distance.Between(
+          Number.isFinite(downX) ? downX : upX,
+          Number.isFinite(downY) ? downY : upY,
+          upX,
+          upY
+        );
+
+        if (moved <= JAM_BEETLE_TAP_MAX_MOVEMENT) {
+          this.handleJamBeetleTap(itemId, pointer);
+        }
+      });
+    }
+
     let itemScoreScale = 1;
     if (this.emergencyBrakePenaltySpawnsRemaining > 0) {
       this.emergencyBrakePenaltySpawnsRemaining = Math.max(0, this.emergencyBrakePenaltySpawnsRemaining - 1);
@@ -5476,7 +6251,7 @@ export default class GameScene extends Phaser.Scene {
 
     const item = {
       id: itemId,
-      type: food.id,
+      type: itemType,
       x: spawnX,
       y: spawnY,
       mainPos: 0,
@@ -5489,12 +6264,15 @@ export default class GameScene extends Phaser.Scene {
       container,
       grabHandle,
       itemVisual,
-      baseColor: food.color
+      baseColor: itemColor,
+      isJamBeetle: spawnJamBeetle,
+      splatTapCount: 0,
+      ignoreTapUntilMs: 0
     };
 
     this.items.push(item);
     this.emitSpawnParticles(item);
-    this.emitTransferParticles(spawnX, spawnY, food.color, 6);
+    this.emitTransferParticles(spawnX, spawnY, itemColor, 6);
 
     this.nextItemId += 1;
   }
@@ -5558,7 +6336,7 @@ export default class GameScene extends Phaser.Scene {
         continue;
       }
 
-      if (item.id === draggedItemId || item.state === 'dragging' || item.state === 'consuming') {
+      if (item.id === draggedItemId || item.state === 'dragging' || item.state === 'consuming' || item.state === 'drone') {
         continue;
       }
 
@@ -5748,34 +6526,10 @@ export default class GameScene extends Phaser.Scene {
     return true;
   }
 
-  handleDragStart(_pointer, gameObject) {
-    if (this.isPaused || this.isDraftActive) {
+  activateDragInteraction(item, gameObject) {
+    if (!item || !gameObject) {
       return;
     }
-
-    if (this.dragContext) {
-      return;
-    }
-
-    const itemId = gameObject.getData('itemId');
-    const item = this.getItemById(itemId);
-    if (!item || item.state === 'consuming') {
-      return;
-    }
-
-    if (item.motionLock && !this.isItemMotionTweenActive(item)) {
-      item.motionLock = false;
-      this.ensureGrabHandleReady(item);
-    }
-
-    if (item.motionLock) {
-      return;
-    }
-
-    this.dragContext = {
-      itemId,
-      fromSlot: this.captureItemSlot(item)
-    };
 
     item.state = 'dragging';
     item.motionLock = true;
@@ -5808,6 +6562,55 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
+  handleDragStart(_pointer, gameObject) {
+    if (this.isPaused || this.isDraftActive) {
+      return;
+    }
+
+    if (this.dragContext) {
+      return;
+    }
+
+    const itemId = gameObject.getData('itemId');
+    const item = this.getItemById(itemId);
+    if (!item || item.state === 'consuming') {
+      return;
+    }
+
+    if (item.motionLock && !this.isItemMotionTweenActive(item)) {
+      item.motionLock = false;
+      this.ensureGrabHandleReady(item);
+    }
+
+    if (item.motionLock) {
+      return;
+    }
+
+    this.dragContext = {
+      itemId,
+      fromSlot: this.captureItemSlot(item),
+      dragStartX: item.x,
+      dragStartY: item.y,
+      dragStartTime: this.time?.now ?? Date.now(),
+      prevDragX: item.x,
+      prevDragY: item.y,
+      prevDragTime: this.time?.now ?? Date.now(),
+      lastDragX: item.x,
+      lastDragY: item.y,
+      lastDragTime: this.time?.now ?? Date.now(),
+      pendingBeetleTap: item.isJamBeetle === true,
+      hasActivatedDrag: item.isJamBeetle !== true
+    };
+
+    if (item.isJamBeetle) {
+      // Tap has priority for beetles. We only upgrade to drag once movement crosses threshold.
+      item.motionLock = true;
+      return;
+    }
+
+    this.activateDragInteraction(item, gameObject);
+  }
+
   handleDrag(_pointer, gameObject, dragX, dragY) {
     if (this.isPaused) {
       return;
@@ -5821,6 +6624,31 @@ export default class GameScene extends Phaser.Scene {
     if (!item) {
       return;
     }
+
+    if (item.isJamBeetle && this.dragContext.pendingBeetleTap && !this.dragContext.hasActivatedDrag) {
+      const movedDistance = Phaser.Math.Distance.Between(
+        this.dragContext.dragStartX,
+        this.dragContext.dragStartY,
+        dragX,
+        dragY
+      );
+
+      if (movedDistance < JAM_BEETLE_GRAB_MIN_MOVEMENT) {
+        return;
+      }
+
+      this.dragContext.pendingBeetleTap = false;
+      this.dragContext.hasActivatedDrag = true;
+      this.activateDragInteraction(item, gameObject);
+    }
+
+    const now = this.time?.now ?? Date.now();
+    this.dragContext.prevDragX = this.dragContext.lastDragX;
+    this.dragContext.prevDragY = this.dragContext.lastDragY;
+    this.dragContext.prevDragTime = this.dragContext.lastDragTime;
+    this.dragContext.lastDragX = dragX;
+    this.dragContext.lastDragY = dragY;
+    this.dragContext.lastDragTime = now;
 
     item.x = dragX;
     item.y = dragY;
@@ -5843,8 +6671,43 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
+    if (draggedItem.isJamBeetle && this.dragContext.pendingBeetleTap && !this.dragContext.hasActivatedDrag) {
+      this.applyItemSlot(draggedItem, this.dragContext.fromSlot);
+      const destination = this.getWorldPositionForSlot(this.dragContext.fromSlot);
+      draggedItem.x = destination.x;
+      draggedItem.y = destination.y;
+      draggedItem.container.setPosition(destination.x, destination.y);
+      draggedItem.grabHandle.setPosition(destination.x, destination.y);
+      draggedItem.ignoreTapUntilMs = (this.time?.now ?? Date.now()) + 120;
+      this.finishDragResolution();
+      this.handleJamBeetleTap(draggedItem.id, pointer, true);
+      return;
+    }
+
     const dropX = pointer.worldX ?? pointer.x;
     const dropY = pointer.worldY ?? pointer.y;
+
+    if (draggedItem.isJamBeetle) {
+      // Main logic: beetle can be placed on belts like a normal item.
+      const laneDropSlot = this.buildLaneDropSlot(draggedItem, dropX, dropY);
+      if (laneDropSlot) {
+        draggedItem.ignoreTapUntilMs = (this.time?.now ?? Date.now()) + 120;
+        this.animateReturnToSlot(draggedItem, laneDropSlot);
+        return;
+      }
+
+      // Second/third logic: if not dropped on a belt, flick only with force; otherwise return.
+      const flickData = this.getJamBeetleFlickData(pointer);
+      if (flickData.isFlick) {
+        this.tossJamBeetle(draggedItem, flickData);
+        return;
+      }
+
+      draggedItem.ignoreTapUntilMs = (this.time?.now ?? Date.now()) + 120;
+      this.animateReturnToSlot(draggedItem, this.dragContext.fromSlot);
+      return;
+    }
+
     const swapTarget = this.findSwapTargetAt(draggedItem, dropX, dropY);
 
     if (swapTarget) {
@@ -5859,6 +6722,222 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.animateReturnToSlot(draggedItem, this.dragContext.fromSlot);
+  }
+
+  getJamBeetleFlickData(pointer) {
+    const context = this.dragContext || {};
+    const now = this.time?.now ?? Date.now();
+
+    const fallbackX = Phaser.Math.Between(-1, 1) || 1;
+    const fallbackY = -1;
+
+    const startX = Number.isFinite(context.dragStartX) ? context.dragStartX : Number(pointer?.downX);
+    const startY = Number.isFinite(context.dragStartY) ? context.dragStartY : Number(pointer?.downY);
+    const dropX = Number.isFinite(pointer?.worldX)
+      ? pointer.worldX
+      : Number.isFinite(pointer?.x)
+        ? pointer.x
+        : Number.isFinite(context.lastDragX)
+          ? context.lastDragX
+          : startX;
+    const dropY = Number.isFinite(pointer?.worldY)
+      ? pointer.worldY
+      : Number.isFinite(pointer?.y)
+        ? pointer.y
+        : Number.isFinite(context.lastDragY)
+          ? context.lastDragY
+          : startY;
+
+    const segmentStartX = Number.isFinite(context.prevDragX) ? context.prevDragX : startX;
+    const segmentStartY = Number.isFinite(context.prevDragY) ? context.prevDragY : startY;
+    const segmentEndX = Number.isFinite(context.lastDragX) ? context.lastDragX : dropX;
+    const segmentEndY = Number.isFinite(context.lastDragY) ? context.lastDragY : dropY;
+
+    const totalDistance = Phaser.Math.Distance.Between(startX, startY, dropX, dropY);
+    const segmentDistance = Phaser.Math.Distance.Between(segmentStartX, segmentStartY, segmentEndX, segmentEndY);
+
+    const segmentStartTime = Number.isFinite(context.prevDragTime) ? context.prevDragTime : (Number.isFinite(context.dragStartTime) ? context.dragStartTime : now - 16);
+    const segmentEndTime = Number.isFinite(context.lastDragTime) ? context.lastDragTime : now;
+    const segmentDurationMs = Math.max(16, segmentEndTime - segmentStartTime);
+    const dragStartTime = Number.isFinite(context.dragStartTime) ? context.dragStartTime : now - 16;
+    const dragDurationMs = Math.max(16, now - dragStartTime);
+
+    const segmentSpeed = (segmentDistance / segmentDurationMs) * 1000;
+    const averageSpeed = (totalDistance / dragDurationMs) * 1000;
+    const pointerVelocityX = Number(pointer?.velocity?.x);
+    const pointerVelocityY = Number(pointer?.velocity?.y);
+    const pointerSpeed = Number.isFinite(pointerVelocityX) && Number.isFinite(pointerVelocityY)
+      ? Math.hypot(pointerVelocityX, pointerVelocityY) * 1000
+      : 0;
+
+    const releaseSpeed = Math.max(segmentSpeed, averageSpeed, pointerSpeed);
+    const isFlick = totalDistance >= JAM_BEETLE_FLICK_MIN_DISTANCE && releaseSpeed >= JAM_BEETLE_FLICK_MIN_SPEED;
+
+    let directionX = segmentEndX - segmentStartX;
+    let directionY = segmentEndY - segmentStartY;
+    if (Math.hypot(directionX, directionY) < 0.01) {
+      directionX = dropX - startX;
+      directionY = dropY - startY;
+    }
+    if (Math.hypot(directionX, directionY) < 0.01) {
+      directionX = fallbackX;
+      directionY = fallbackY;
+    }
+
+    const directionLength = Math.max(0.0001, Math.hypot(directionX, directionY));
+    const normalizedX = directionX / directionLength;
+    const normalizedY = directionY / directionLength;
+    const launchSpeed = Phaser.Math.Clamp(releaseSpeed * 0.45, JAM_BEETLE_TOSS_MIN_SPEED, JAM_BEETLE_TOSS_MAX_SPEED);
+
+    return {
+      isFlick,
+      velocityX: normalizedX * launchSpeed,
+      velocityY: normalizedY * launchSpeed,
+      totalDistance,
+      releaseSpeed
+    };
+  }
+
+  tossJamBeetle(item, flickData) {
+    if (!item || !item.isJamBeetle) {
+      this.finishDragResolution();
+      return;
+    }
+
+    const originX = item.x;
+    const originY = item.y;
+    const textureKey = item.itemVisual?.texture?.key;
+    const hasTextureKey = typeof textureKey === 'string' && this.textures.exists(textureKey);
+    const spriteKey = hasTextureKey ? textureKey : 'fx_dot';
+
+    const itemScaleX = Number(item.itemVisual?.scaleX) || 1;
+    const itemScaleY = Number(item.itemVisual?.scaleY) || 1;
+    const containerScaleX = Number(item.container?.scaleX) || 1;
+    const containerScaleY = Number(item.container?.scaleY) || 1;
+    const worldScaleX = itemScaleX * containerScaleX;
+    const worldScaleY = itemScaleY * containerScaleY;
+
+    this.removeItemById(item.id);
+    this.finishDragResolution();
+
+    if (!this.physics?.add) {
+      return;
+    }
+
+    const tossed = this.physics.add.sprite(originX, originY, spriteKey).setDepth(260);
+    tossed.setScale(worldScaleX, worldScaleY);
+    tossed.setAlpha(1);
+    tossed.setAngle(Number(item.container?.angle) || 0);
+
+    if (item.isJamBeetle && this.anims.exists(JAM_BEETLE_ANIM_KEY)) {
+      tossed.play(JAM_BEETLE_ANIM_KEY);
+    }
+
+    const velocityX = Number.isFinite(flickData?.velocityX)
+      ? flickData.velocityX
+      : (Phaser.Math.Between(-1, 1) || 1) * JAM_BEETLE_TOSS_MIN_SPEED;
+    const velocityY = Number.isFinite(flickData?.velocityY)
+      ? flickData.velocityY
+      : -JAM_BEETLE_TOSS_MIN_SPEED;
+
+    tossed.setCollideWorldBounds(true);
+    tossed.setBounce(0.58, 0.58);
+    tossed.setDamping(true);
+    tossed.setDrag(320, 320);
+    tossed.setVelocity(velocityX, velocityY);
+    tossed.setAngularVelocity(Phaser.Math.Between(-180, 180));
+
+    this.emitTransferParticles(originX, originY, item.baseColor, 15);
+    this.emitShockRing(originX, originY, 0xfb7185, 1.7, 170);
+    this.playImpactFx(0.72, 0xf97316);
+    this.playSfx('swap', 1.05);
+    this.rumble(0.3, 0.24, 94);
+
+    this.tweens.add({
+      targets: tossed,
+      alpha: 0.35,
+      scaleX: worldScaleX * 0.7,
+      scaleY: worldScaleY * 0.7,
+      duration: JAM_BEETLE_TOSS_TOTAL_DURATION_MS,
+      ease: 'Sine.Out',
+      onComplete: () => {
+        if (tossed?.active) {
+          this.emitBloodParticles(tossed.x, tossed.y, 1);
+          this.emitJamParticles({ x: tossed.x, y: tossed.y, baseColor: item.baseColor });
+          this.emitShockRing(tossed.x, tossed.y, 0xb91c1c, 1.85, 180);
+          tossed.destroy();
+        }
+      }
+    });
+  }
+
+  handleJamBeetleTap(itemId, _pointer = null, force = false) {
+    if (this.isPaused || this.isDraftActive || this.isGameOver || this.sceneTransitioning) {
+      return;
+    }
+
+    const item = this.getItemById(itemId);
+    if (!item || !item.isJamBeetle || item.state === 'consuming' || item.state === 'dragging') {
+      return;
+    }
+
+    const now = this.time?.now ?? Date.now();
+    if (!force && Number.isFinite(item.ignoreTapUntilMs) && now < item.ignoreTapUntilMs) {
+      return;
+    }
+
+    item.splatTapCount = (item.splatTapCount || 0) + 1;
+    if (item.splatTapCount >= JAM_BEETLE_TAPS_TO_SPLAT) {
+      this.splatJamBeetle(item);
+      return;
+    }
+
+    this.playSfx('jam', 0.76);
+    this.playImpactFx(0.36, 0xfb7185);
+    this.emitShockRing(item.x, item.y, 0xfb7185, 1.35, 140);
+
+    this.tweens.killTweensOf(item.container);
+    item.container.setAngle(0);
+    this.tweens.add({
+      targets: item.container,
+      scaleX: 1.14,
+      scaleY: 1.14,
+      angle: Phaser.Math.Between(-11, 11),
+      duration: 74,
+      yoyo: true,
+      ease: 'Sine.Out',
+      onComplete: () => {
+        if (!item.container?.active) {
+          return;
+        }
+
+        item.container.setScale(1);
+        item.container.setAngle(0);
+      }
+    });
+  }
+
+  splatJamBeetle(item) {
+    if (!item || !item.isJamBeetle) {
+      return;
+    }
+
+    const splatX = item.x;
+    const splatY = item.y;
+
+    this.emitBloodParticles(splatX, splatY, 1.25);
+    this.emitJamParticles(item);
+    this.emitTransferParticles(splatX, splatY, item.baseColor, 14);
+    this.emitShockRing(splatX, splatY, 0xfb7185, 2.55, 230);
+    this.emitFloatingText(splatX, splatY - 26, 'SPLAT!', '#ffdce2', 24);
+    this.playImpactFx(1.24, 0xfb7185);
+    this.playSfx('jam', 1.28);
+    this.rumble(0.48, 0.36, 136);
+
+    this.removeItemById(item.id);
+    if (this.dragContext?.itemId === item.id) {
+      this.finishDragResolution();
+    }
   }
 
   animateReturnToSlot(item, slot) {
@@ -6535,7 +7614,7 @@ export default class GameScene extends Phaser.Scene {
         if (item.state === 'jammed') {
           item.lanePos = Math.min(item.lanePos, maxAllowedPos);
 
-          if (chestPriorityActive && !item.motionLock) {
+          if (chestPriorityActive && !item.motionLock && !item.isJamBeetle) {
             item.lanePos = lane.length;
             this.animateLaneItemIntoChest(item, lane, false);
           }
@@ -6556,8 +7635,9 @@ export default class GameScene extends Phaser.Scene {
           if (item.lanePos >= lane.length) {
             item.lanePos = lane.length;
 
-            const isCorrectLane = item.type === lane.desiredType;
-            const shouldGraceAccept = !isCorrectLane && chestPriorityActive;
+            const isJamBeetle = item.isJamBeetle === true;
+            const isCorrectLane = !isJamBeetle && item.type === lane.desiredType;
+            const shouldGraceAccept = !isJamBeetle && !isCorrectLane && chestPriorityActive;
 
             if (isCorrectLane || shouldGraceAccept) {
               if (shouldGraceAccept) {

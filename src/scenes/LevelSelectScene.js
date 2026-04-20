@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { getCampaignLevels } from '../data/levels';
+import { DEBUG_LEVEL_ID, getCampaignLevels } from '../data/levels';
 import { getCompletedCampaignLevelIds } from '../data/campaignProgress';
 
 const FOOD_COLORS = {
@@ -223,6 +223,7 @@ export default class LevelSelectScene extends Phaser.Scene {
     this.input.keyboard?.on('keydown-S', this.moveSelectionDown, this);
     this.input.keyboard?.on('keydown-ENTER', this.launchSelectedLevel, this);
     this.input.keyboard?.on('keydown-SPACE', this.launchSelectedLevel, this);
+    this.input.keyboard?.on('keydown', this.handleDebugShortcut, this);
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.input.keyboard?.off('keydown-LEFT', this.moveSelectionLeft, this);
@@ -235,6 +236,7 @@ export default class LevelSelectScene extends Phaser.Scene {
       this.input.keyboard?.off('keydown-S', this.moveSelectionDown, this);
       this.input.keyboard?.off('keydown-ENTER', this.launchSelectedLevel, this);
       this.input.keyboard?.off('keydown-SPACE', this.launchSelectedLevel, this);
+      this.input.keyboard?.off('keydown', this.handleDebugShortcut, this);
     });
   }
 
@@ -619,6 +621,39 @@ export default class LevelSelectScene extends Phaser.Scene {
     });
   }
 
+  handleDebugShortcut(event) {
+    if (this.isTransitioning || !event || event.repeat) {
+      return;
+    }
+
+    const isBackslash = event.code === 'Backslash' || event.key === '\\';
+    if (!isBackslash) {
+      return;
+    }
+
+    event.preventDefault?.();
+    this.launchLevelById(DEBUG_LEVEL_ID, 'Loading Debug');
+  }
+
+  launchLevelById(levelId, loadingLabel = 'Loading Shift') {
+    if (this.isTransitioning || typeof levelId !== 'string' || levelId.length === 0) {
+      return;
+    }
+
+    const mainMenuScene = this.scene.get('MainMenuScene');
+    if (mainMenuScene && typeof mainMenuScene.stopMusicForGameplay === 'function') {
+      mainMenuScene.stopMusicForGameplay(0.14);
+    }
+
+    this.isTransitioning = true;
+    this.scene.start('LoadingScene', {
+      targetSceneKey: 'GameScene',
+      targetData: { levelId },
+      loadingLabel,
+      readyLabel: 'Shift Ready'
+    });
+  }
+
   launchSelectedLevel() {
     if (this.isTransitioning) {
       return;
@@ -634,17 +669,6 @@ export default class LevelSelectScene extends Phaser.Scene {
       return;
     }
 
-    const mainMenuScene = this.scene.get('MainMenuScene');
-    if (mainMenuScene && typeof mainMenuScene.stopMusicForGameplay === 'function') {
-      mainMenuScene.stopMusicForGameplay(0.14);
-    }
-
-    this.isTransitioning = true;
-    this.scene.start('LoadingScene', {
-      targetSceneKey: 'GameScene',
-      targetData: { levelId: selected.id },
-      loadingLabel: `Loading ${selected.id}`,
-      readyLabel: 'Shift Ready'
-    });
+    this.launchLevelById(selected.id, `Loading ${selected.id}`);
   }
 }

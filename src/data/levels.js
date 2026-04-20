@@ -366,13 +366,21 @@ const ENDLESS_LEVEL = {
   }
 };
 
+export const DEFAULT_LEVEL_ID = 'ENDLESS';
+export const DEBUG_LEVEL_ID = 'DEBUG';
+
+const DEBUG_LEVEL = {
+  ...ENDLESS_LEVEL,
+  id: DEBUG_LEVEL_ID,
+  title: 'Debug Endless',
+  subtitle: 'Endless Clone (Debug)'
+};
+
 const LEVELS = [...CAMPAIGN_LEVELS, ENDLESS_LEVEL];
-const LEVELS_BY_ID = LEVELS.reduce((acc, level) => {
+const LEVELS_BY_ID = [...LEVELS, DEBUG_LEVEL].reduce((acc, level) => {
   acc[level.id] = level;
   return acc;
 }, {});
-
-export const DEFAULT_LEVEL_ID = 'ENDLESS';
 
 export function getAllLevels() {
   return LEVELS.map(cloneLevelConfig);

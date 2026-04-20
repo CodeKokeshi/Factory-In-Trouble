@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { DEFAULT_LEVEL_ID } from '../data/levels';
+import { DEBUG_LEVEL_ID, DEFAULT_LEVEL_ID } from '../data/levels';
 import beforeFirstShiftUrl from '../../assets/audio/music/Before_the_First_Shift.mp3';
 
 const MENU_MUSIC_GAIN = 0.82;
@@ -376,6 +376,7 @@ export default class MainMenuScene extends Phaser.Scene {
     this.input.keyboard?.on('keydown-S', this.moveSelectionDown, this);
     this.input.keyboard?.on('keydown-ENTER', this.confirmSelection, this);
     this.input.keyboard?.on('keydown-SPACE', this.confirmSelection, this);
+    this.input.keyboard?.on('keydown', this.handleDebugShortcut, this);
 
     this.input.on('pointerdown', this.unlockMenuAudioContext, this);
     this.input.keyboard?.on('keydown', this.unlockMenuAudioContext, this);
@@ -747,6 +748,28 @@ export default class MainMenuScene extends Phaser.Scene {
     this.optionEntries[this.selectedIndex]?.action?.();
   }
 
+  handleDebugShortcut(event) {
+    if (this.isTransitioning || !event || event.repeat) {
+      return;
+    }
+
+    const isBackslash = event.code === 'Backslash' || event.key === '\\';
+    if (!isBackslash) {
+      return;
+    }
+
+    event.preventDefault?.();
+    this.launchDebugLevel();
+  }
+
+  launchDebugLevel() {
+    if (this.isTransitioning) {
+      return;
+    }
+
+    this.transitionTo('GameScene', { levelId: DEBUG_LEVEL_ID });
+  }
+
   transitionTo(sceneKey, data = undefined) {
     if (this.isTransitioning) {
       return;
@@ -821,6 +844,7 @@ export default class MainMenuScene extends Phaser.Scene {
     this.input.keyboard?.off('keydown-S', this.moveSelectionDown, this);
     this.input.keyboard?.off('keydown-ENTER', this.confirmSelection, this);
     this.input.keyboard?.off('keydown-SPACE', this.confirmSelection, this);
+    this.input.keyboard?.off('keydown', this.handleDebugShortcut, this);
 
     this.input.off('pointerdown', this.unlockMenuAudioContext, this);
     this.input.keyboard?.off('keydown', this.unlockMenuAudioContext, this);
