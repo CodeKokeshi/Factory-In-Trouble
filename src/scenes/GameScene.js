@@ -13,6 +13,7 @@ const JAM_BEETLE_TYPE_ID = 'jam_beetle';
 const JAM_BEETLE_COLOR = 0xfb7185;
 const JAM_BEETLE_ANIM_KEY = 'jam_beetle_walk';
 const JAM_BEETLE_TAPS_TO_SPLAT = 3;
+const JAM_BEETLE_INTRO_LEVEL_INDEX = 2;
 const JAM_BEETLE_SPAWN_SCALE = 0.62;
 const JAM_BEETLE_TAP_MAX_MOVEMENT = 12;
 const JAM_BEETLE_GRAB_MIN_MOVEMENT = 20;
@@ -26,6 +27,13 @@ const DRONE_SABOTAGE_MIN_COOLDOWN_MS = 9500;
 const DRONE_SABOTAGE_MAX_COOLDOWN_MS = 15500;
 const DRONE_SABOTAGE_RETRY_MIN_MS = 1400;
 const DRONE_SABOTAGE_RETRY_MAX_MS = 3000;
+const DRONE_SABOTAGE_STRESS_RETRY_MIN_MS = 2600;
+const DRONE_SABOTAGE_STRESS_RETRY_MAX_MS = 5200;
+const DRONE_SABOTAGE_INTRO_LEVEL_INDEX = 3;
+const DRONE_SABOTAGE_STRESS_PRESSURE_THRESHOLD = 0.74;
+const DRONE_SABOTAGE_STRESS_JAM_LOAD_THRESHOLD = 0.56;
+const DRONE_SABOTAGE_STRESS_CLOG_RATIO_THRESHOLD = 0.45;
+const DRONE_SABOTAGE_FREE_LANE_RATIO_ALLOW = 0.67;
 const DRONE_WARNING_DURATION_MS = 1000;
 const DRONE_FLIGHT_SPEED_PX_PER_SEC = 460;
 const DRONE_FLIGHT_MIN_DURATION_MS = 420;
@@ -33,6 +41,17 @@ const DRONE_FLIGHT_MAX_DURATION_MS = 1960;
 const DRONE_PICKUP_HOLD_MS = 120;
 const DRONE_DROP_HOLD_MS = 95;
 const DRONE_CARRY_OFFSET_Y = 20;
+
+const CLAW_BREAKDOWN_HP_MIN = 4;
+const CLAW_BREAKDOWN_HP_MAX = 8;
+const CLAW_BREAKDOWN_DRAIN_MIN = 0.8;
+const CLAW_BREAKDOWN_DRAIN_MAX = 1.35;
+const CLAW_BREAKDOWN_REPAIR_MIN_MS = 3600;
+const CLAW_BREAKDOWN_REPAIR_MAX_MS = 6200;
+const CLAW_BREAKDOWN_SMOKE_MIN_INTERVAL_MS = 110;
+const CLAW_BREAKDOWN_SMOKE_MAX_INTERVAL_MS = 200;
+const CLAW_BREAKDOWN_BAR_WIDTH = 24;
+const CLAW_BREAKDOWN_BAR_HEIGHT = 3;
 
 const MAIN_BELT_WIDTH = 74;
 const MAIN_BELT_HEIGHT = 560;
@@ -296,6 +315,7 @@ export default class GameScene extends Phaser.Scene {
     this.jamParticles = null;
     this.transferParticles = null;
     this.bloodParticles = null;
+    this.smokeParticles = null;
 
     this.droneActive = false;
     this.droneContainer = null;
@@ -303,6 +323,9 @@ export default class GameScene extends Phaser.Scene {
     this.droneCarryItemId = null;
     this.droneSabotageTimerMs = 0;
     this.droneRunToken = 0;
+
+    this.clawBreakdownEnabled = false;
+    this.clawBreakdownDebugTextEnabled = false;
 
     this.isGameOver = false;
     this.isPaused = false;
@@ -492,6 +515,8 @@ export default class GameScene extends Phaser.Scene {
 
     this.levelMode = levelConfig?.mode || 'endless';
     this.levelName = levelConfig?.title || levelConfig?.id || 'Untitled Level';
+    this.clawBreakdownEnabled = this.levelId === DEBUG_LEVEL_ID && this.levelMode === 'endless';
+    this.clawBreakdownDebugTextEnabled = false;
     this.levelLayoutFamily = levelConfig?.layoutFamily || 'rotated_h';
     this.applyLayoutFamilyBehavior(this.levelLayoutFamily);
     this.isFiniteLevel = this.levelMode !== 'endless' && Number.isFinite(levelConfig?.quota);
@@ -3910,6 +3935,20 @@ export default class GameScene extends Phaser.Scene {
         blendMode: 'NORMAL'
       })
       .setDepth(62);
+
+    this.smokeParticles = this.add
+      .particles(0, 0, particleTextureKey, {
+        frequency: -1,
+        quantity: 0,
+        lifespan: { min: 420, max: 760 },
+        speed: { min: 26, max: 82 },
+        angle: { min: 248, max: 292 },
+        gravityY: -20,
+        scale: { start: 0.46, end: 1.3 },
+        alpha: { start: 0.55, end: 0 },
+        blendMode: 'NORMAL'
+      })
+      .setDepth(12);
   }
 
   emitChestConsumeParticles(item, lane) {
@@ -3948,6 +3987,17 @@ export default class GameScene extends Phaser.Scene {
     const quantity = Math.round(18 * clampedIntensity);
     this.bloodParticles.setParticleTint(0x7f1d1d, 0x991b1b, 0xb91c1c, 0xef4444);
     this.bloodParticles.explode(quantity, x, y);
+  }
+
+  emitClawSmoke(x, y, intensity = 1) {
+    if (!this.smokeParticles) {
+      return;
+    }
+
+    const clampedIntensity = Phaser.Math.Clamp(intensity, 0.6, 2.4);
+    const quantity = Phaser.Math.Clamp(Math.round(4 * clampedIntensity), 2, 10);
+    this.smokeParticles.setParticleTint(0x94a3b8, 0x64748b, 0x475569);
+    this.smokeParticles.explode(quantity, x, y);
   }
 
   emitTransferParticles(x, y, color, quantity = 10) {
@@ -4655,6 +4705,7 @@ export default class GameScene extends Phaser.Scene {
     this.updateCardEffects(manualScaledDeltaMs);
     this.updateDifficulty();
     this.recoverStaleMotionLocks();
+    this.updateClawBreakdowns(scaledDeltaMs);
 
     this.spawnBlockedThisFrame = false;
 
@@ -5317,8 +5368,22 @@ export default class GameScene extends Phaser.Scene {
         chestBubbleTextureKeys: laneTextureKeys,
         chestBubbleTextureIndex: 0,
         chestBubbleSwapMs: 0,
-        chestBubbleSwapIntervalMs: CHEST_BUBBLE_SWAP_INTERVAL_MS
+        chestBubbleSwapIntervalMs: CHEST_BUBBLE_SWAP_INTERVAL_MS,
+        clawHeatMax: 0,
+        clawHeatCurrent: 0,
+        clawOverheated: false,
+        clawRepairDurationMs: 0,
+        clawRepairProgressMs: 0,
+        clawSmokeTickMs: 0,
+        clawRepairDrone: null,
+        clawRepairDroneHoverTween: null,
+        clawRepairDroneRotorTween: null,
+        clawHeatBarBg: null,
+        clawHeatBarFill: null,
+        clawHeatDebugText: null
       };
+
+      this.initializeLaneClawBreakdown(this.lanesById[laneConfig.id]);
     });
   }
 
@@ -5364,6 +5429,227 @@ export default class GameScene extends Phaser.Scene {
       if (iconDim > 0) {
         lane.chestBubbleIcon.setScale(CHEST_BUBBLE_ICON_SIZE / iconDim);
       }
+    }
+  }
+
+  initializeLaneClawBreakdown(lane) {
+    if (!lane?.clawContainer || !this.clawBreakdownEnabled) {
+      return;
+    }
+
+    lane.clawHeatMax = Phaser.Math.Between(CLAW_BREAKDOWN_HP_MIN, CLAW_BREAKDOWN_HP_MAX);
+    lane.clawHeatCurrent = lane.clawHeatMax;
+    lane.clawOverheated = false;
+    lane.clawRepairDurationMs = 0;
+    lane.clawRepairProgressMs = 0;
+    lane.clawSmokeTickMs = 0;
+
+    const barX = lane.clawContainer.x;
+    const barY = lane.y - 18;
+
+    lane.clawHeatBarBg = this.add
+      .rectangle(barX, barY, CLAW_BREAKDOWN_BAR_WIDTH + 2, CLAW_BREAKDOWN_BAR_HEIGHT + 2, 0x0f172a, 0.74)
+      .setDepth(12)
+      .setVisible(false);
+    lane.clawHeatBarFill = this.add
+      .rectangle(barX - CLAW_BREAKDOWN_BAR_WIDTH * 0.5, barY, CLAW_BREAKDOWN_BAR_WIDTH, CLAW_BREAKDOWN_BAR_HEIGHT, 0x22c55e, 0.96)
+      .setOrigin(0, 0.5)
+      .setDepth(13)
+      .setVisible(false);
+
+    this.refreshLaneClawBreakdownVisual(lane);
+  }
+
+  refreshLaneClawBreakdownVisual(lane) {
+    if (!lane?.clawContainer || !this.clawBreakdownEnabled) {
+      return;
+    }
+
+    const repairRatio = Phaser.Math.Clamp(
+      lane.clawRepairProgressMs / Math.max(1, lane.clawRepairDurationMs || 1),
+      0,
+      1
+    );
+    const showRepairVisual = lane.clawOverheated === true;
+
+    if (lane.clawHeatBarBg?.active) {
+      lane.clawHeatBarBg.setVisible(showRepairVisual);
+    }
+
+    if (lane.clawHeatBarFill?.active) {
+      lane.clawHeatBarFill.setVisible(showRepairVisual);
+      const fillWidth = CLAW_BREAKDOWN_BAR_WIDTH * repairRatio;
+      lane.clawHeatBarFill.setDisplaySize(Math.max(0.001, fillWidth), CLAW_BREAKDOWN_BAR_HEIGHT);
+      lane.clawHeatBarFill.setAlpha(fillWidth > 0.02 ? 0.95 : 0);
+      lane.clawHeatBarFill.setFillStyle(0x38bdf8, 0.96);
+    }
+  }
+
+  canLaneTransferClawGrab(laneId) {
+    if (!this.clawBreakdownEnabled) {
+      return true;
+    }
+
+    const lane = this.lanesById[laneId];
+    if (!lane?.clawContainer) {
+      return true;
+    }
+
+    return lane.clawOverheated !== true;
+  }
+
+  consumeLaneClawHeat(lane) {
+    if (!this.clawBreakdownEnabled || !lane || lane.clawOverheated) {
+      return;
+    }
+
+    const drain = Phaser.Math.FloatBetween(CLAW_BREAKDOWN_DRAIN_MIN, CLAW_BREAKDOWN_DRAIN_MAX);
+    lane.clawHeatCurrent = Math.max(0, lane.clawHeatCurrent - drain);
+
+    if (lane.clawHeatCurrent <= 0.001) {
+      this.triggerLaneClawOverheat(lane);
+      return;
+    }
+
+    this.refreshLaneClawBreakdownVisual(lane);
+  }
+
+  triggerLaneClawOverheat(lane) {
+    if (!lane || lane.clawOverheated) {
+      return;
+    }
+
+    lane.clawOverheated = true;
+    lane.clawHeatCurrent = 0;
+    lane.clawRepairDurationMs = Phaser.Math.Between(CLAW_BREAKDOWN_REPAIR_MIN_MS, CLAW_BREAKDOWN_REPAIR_MAX_MS);
+    lane.clawRepairProgressMs = 0;
+    lane.clawSmokeTickMs = 0;
+
+    if (lane.clawContainer?.active) {
+      this.tweens.killTweensOf(lane.clawContainer);
+      lane.clawContainer.setAngle(lane.clawBaseAngle ?? 0);
+      lane.clawContainer.setAlpha(0.36);
+      this.emitClawSmoke(lane.clawContainer.x, lane.y - 4, 2.2);
+    }
+
+    this.pulseLaneVisual(lane.id, 0.78, true);
+    this.spawnLaneRepairDrone(lane);
+    this.refreshLaneClawBreakdownVisual(lane);
+  }
+
+  spawnLaneRepairDrone(lane) {
+    if (!lane?.clawContainer || lane.clawRepairDrone?.active) {
+      return;
+    }
+
+    const droneX = lane.clawContainer.x;
+    const droneY = lane.y - 30;
+    const container = this.add.container(droneX, droneY).setDepth(14).setAlpha(0);
+    const shadow = this.add.ellipse(0, 7, 16, 6, 0x020617, 0.22);
+    const body = this.add.rectangle(0, 0, 12, 6, 0x475569, 1).setStrokeStyle(1, 0x94a3b8, 0.95);
+    const light = this.add.rectangle(0, 0, 4, 2, 0x22d3ee, 0.85);
+    const rotor = this.add.container(0, -4);
+    const bladeA = this.add.rectangle(0, 0, 14, 1, 0xe2e8f0, 0.95);
+    const bladeB = this.add.rectangle(0, 0, 14, 1, 0xe2e8f0, 0.95).setAngle(90);
+    rotor.add([bladeA, bladeB]);
+    container.add([shadow, body, light, rotor]);
+
+    lane.clawRepairDrone = container;
+    lane.clawRepairDroneRotorTween = this.tweens.add({
+      targets: rotor,
+      angle: 360,
+      duration: 125,
+      repeat: -1,
+      ease: 'Linear'
+    });
+    lane.clawRepairDroneHoverTween = this.tweens.add({
+      targets: container,
+      y: droneY - 2,
+      duration: 420,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    this.tweens.add({
+      targets: container,
+      alpha: 1,
+      duration: 140,
+      ease: 'Quad.Out'
+    });
+  }
+
+  despawnLaneRepairDrone(lane, animateOut = false) {
+    if (!lane) {
+      return;
+    }
+
+    lane.clawRepairDroneHoverTween?.remove?.();
+    lane.clawRepairDroneRotorTween?.remove?.();
+    lane.clawRepairDroneHoverTween = null;
+    lane.clawRepairDroneRotorTween = null;
+
+    const drone = lane.clawRepairDrone;
+    lane.clawRepairDrone = null;
+
+    if (!drone?.active) {
+      return;
+    }
+
+    if (!animateOut) {
+      drone.destroy(true);
+      return;
+    }
+
+    this.tweens.add({
+      targets: drone,
+      y: drone.y - 12,
+      alpha: 0,
+      duration: 230,
+      ease: 'Sine.In',
+      onComplete: () => {
+        drone.destroy(true);
+      }
+    });
+  }
+
+  updateClawBreakdowns(deltaMs) {
+    if (!this.clawBreakdownEnabled || deltaMs <= 0) {
+      return;
+    }
+
+    for (const lane of Object.values(this.lanesById)) {
+      if (!lane?.clawContainer) {
+        continue;
+      }
+
+      if (lane.clawOverheated) {
+        lane.clawRepairProgressMs = Math.min(lane.clawRepairDurationMs, lane.clawRepairProgressMs + deltaMs);
+        lane.clawSmokeTickMs -= deltaMs;
+        if (lane.clawSmokeTickMs <= 0) {
+          lane.clawSmokeTickMs = Phaser.Math.Between(
+            CLAW_BREAKDOWN_SMOKE_MIN_INTERVAL_MS,
+            CLAW_BREAKDOWN_SMOKE_MAX_INTERVAL_MS
+          );
+          this.emitClawSmoke(lane.clawContainer.x + Phaser.Math.Between(-2, 2), lane.y - 4, 1.8);
+        }
+
+        if (lane.clawRepairProgressMs >= lane.clawRepairDurationMs) {
+          lane.clawOverheated = false;
+          lane.clawHeatCurrent = lane.clawHeatMax;
+          lane.clawSmokeTickMs = 0;
+
+          if (lane.clawContainer?.active) {
+            lane.clawContainer.setAlpha(1);
+            lane.clawContainer.setAngle(lane.clawBaseAngle ?? 0);
+            this.emitTransferParticles(lane.clawContainer.x, lane.y - 6, 0x93c5fd, 6);
+          }
+
+          this.pulseLaneVisual(lane.id, 0.44, false);
+          this.despawnLaneRepairDrone(lane, true);
+        }
+      }
+
+      this.refreshLaneClawBreakdownVisual(lane);
     }
   }
 
@@ -5505,7 +5791,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const levelIndex = Number(this.levelConfig?.index);
-    return Number.isFinite(levelIndex) && levelIndex >= 2;
+    return Number.isFinite(levelIndex) && levelIndex >= JAM_BEETLE_INTRO_LEVEL_INDEX;
   }
 
   shouldSpawnJamBeetle() {
@@ -5531,7 +5817,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const levelIndex = Number(this.levelConfig?.index);
-    return Number.isFinite(levelIndex) && levelIndex >= 3;
+    return Number.isFinite(levelIndex) && levelIndex >= DRONE_SABOTAGE_INTRO_LEVEL_INDEX;
   }
 
   resetDroneSabotageTimer(minMs = DRONE_SABOTAGE_MIN_COOLDOWN_MS, maxMs = DRONE_SABOTAGE_MAX_COOLDOWN_MS) {
@@ -5596,6 +5882,12 @@ export default class GameScene extends Phaser.Scene {
       return;
     }
 
+    const deferDecision = this.shouldDeferDroneSabotageForStress();
+    if (deferDecision.defer) {
+      this.resetDroneSabotageTimer(DRONE_SABOTAGE_STRESS_RETRY_MIN_MS, DRONE_SABOTAGE_STRESS_RETRY_MAX_MS);
+      return;
+    }
+
     const targetItem = this.pickDroneSabotageTargetItem();
     if (!targetItem) {
       this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
@@ -5609,6 +5901,52 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.startDroneSabotageRun(targetItem.id, dropPlan);
+  }
+
+  getDroneSabotageStressSnapshot() {
+    const laneCount = Math.max(1, this.laneLayout.length);
+    const enterableLaneCount = this.laneLayout.reduce(
+      (count, laneConfig) => count + (this.canEnterLane(laneConfig.id) ? 1 : 0),
+      0
+    );
+    const freeLaneRatio = enterableLaneCount / laneCount;
+
+    const pressureSnapshot = this.calculatePressureSnapshot();
+    const sampledPressure = Number.isFinite(this.currentPressure)
+      ? Phaser.Math.Clamp(this.currentPressure, 0, 1)
+      : 0;
+    const pressure = Math.max(sampledPressure, pressureSnapshot.pressure);
+
+    const jamLoad = Phaser.Math.Clamp(pressureSnapshot.jamLoad ?? 0, 0, 1);
+    const clogRatio = this.clogGraceSeconds > 0
+      ? Phaser.Math.Clamp(this.clogTimerSeconds / this.clogGraceSeconds, 0, 1)
+      : 0;
+
+    return {
+      pressure,
+      jamLoad,
+      clogRatio,
+      laneCount,
+      enterableLaneCount,
+      freeLaneRatio
+    };
+  }
+
+  shouldDeferDroneSabotageForStress() {
+    const snapshot = this.getDroneSabotageStressSnapshot();
+    const highPressure = snapshot.pressure >= DRONE_SABOTAGE_STRESS_PRESSURE_THRESHOLD;
+    const highJamLoad = snapshot.jamLoad >= DRONE_SABOTAGE_STRESS_JAM_LOAD_THRESHOLD;
+    const nearClog = snapshot.clogRatio >= DRONE_SABOTAGE_STRESS_CLOG_RATIO_THRESHOLD;
+
+    const lotsOfFreeSideBelts = snapshot.freeLaneRatio >= DRONE_SABOTAGE_FREE_LANE_RATIO_ALLOW;
+    const overloaded = highPressure || highJamLoad || nearClog;
+
+    return {
+      defer: overloaded && !lotsOfFreeSideBelts,
+      overloaded,
+      lotsOfFreeSideBelts,
+      snapshot
+    };
   }
 
   pickDroneSabotageTargetItem() {
@@ -5668,6 +6006,21 @@ export default class GameScene extends Phaser.Scene {
       if (lanePos !== null) {
         return {
           laneId: lane.id,
+          lanePos
+        };
+      }
+    }
+
+    return null;
+  }
+
+  pickDroneAnyLaneDrop(excludedItemId = null) {
+    const shuffled = Phaser.Utils.Array.Shuffle([...this.laneLayout]);
+    for (const laneConfig of shuffled) {
+      const lanePos = this.findFirstFreeLanePosFromStart(laneConfig.id, excludedItemId);
+      if (lanePos !== null) {
+        return {
+          laneId: laneConfig.id,
           lanePos
         };
       }
@@ -5885,6 +6238,8 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.tweens.killTweensOf(item.container);
+    item.droneSourceLaneId = item.laneId;
+    item.droneSourceLanePos = item.lanePos;
     item.state = 'drone';
     item.motionLock = true;
     item.laneId = null;
@@ -5910,6 +6265,22 @@ export default class GameScene extends Phaser.Scene {
       if (fallbackDrop) {
         laneId = fallbackDrop.laneId;
         lanePos = fallbackDrop.lanePos;
+      }
+    }
+
+    if (lanePos === null && item.droneSourceLaneId) {
+      laneId = item.droneSourceLaneId;
+      lanePos = this.findNearestAvailableLanePos(laneId, item.droneSourceLanePos ?? 0, item.id);
+      if (lanePos === null) {
+        lanePos = this.findFirstFreeLanePosFromStart(laneId, item.id);
+      }
+    }
+
+    if (lanePos === null && !this.layoutUsesMainBelt) {
+      const anySideDrop = this.pickDroneAnyLaneDrop(item.id);
+      if (anySideDrop) {
+        laneId = anySideDrop.laneId;
+        lanePos = anySideDrop.lanePos;
       }
     }
 
@@ -5948,6 +6319,8 @@ export default class GameScene extends Phaser.Scene {
     this.ensureGrabHandleReady(item);
     this.emitTransferParticles(item.x, item.y, item.baseColor, 12);
     this.emitShockRing(item.x, item.y, 0xf97316, 1.7, 170);
+    item.droneSourceLaneId = null;
+    item.droneSourceLanePos = null;
   }
 
   startDroneSabotageRun(targetItemId, plannedDrop) {
@@ -7185,6 +7558,10 @@ export default class GameScene extends Phaser.Scene {
         const best = [];
 
         for (const laneId of laneIds) {
+          if (!this.canLaneTransferClawGrab(laneId)) {
+            continue;
+          }
+
           if (!this.canEnterLane(laneId)) {
             continue;
           }
@@ -7292,11 +7669,26 @@ export default class GameScene extends Phaser.Scene {
 
   transferToLane(item, laneId) {
     const lane = this.lanesById[laneId];
+    if (!item || !lane) {
+      return false;
+    }
+
+    if (!this.canLaneTransferClawGrab(laneId)) {
+      if (lane.clawContainer?.active) {
+        this.emitClawSmoke(lane.clawContainer.x, lane.y - 4, 0.85);
+      }
+      return false;
+    }
 
     const startX = this.mainX;
     const startY = this.getMainWorldY(item.mainPos);
     const destinationX = lane.intakeX;
     const destinationY = lane.y;
+
+    this.consumeLaneClawHeat(lane);
+    if (lane.clawOverheated) {
+      return false;
+    }
 
     item.state = 'side';
     item.laneId = laneId;
@@ -7340,7 +7732,7 @@ export default class GameScene extends Phaser.Scene {
         }
       });
       fallbackTween.timeScale = this.getEffectiveSimulationTimeScale();
-      return;
+      return true;
     }
 
     const baseAngle = typeof lane.clawBaseAngle === 'number' ? lane.clawBaseAngle : lane.direction > 0 ? 0 : 180;
@@ -7461,6 +7853,8 @@ export default class GameScene extends Phaser.Scene {
       ease: 'Sine.InOut'
     });
     squeezeTween.timeScale = this.getEffectiveSimulationTimeScale();
+
+    return true;
   }
 
   animateLaneItemIntoChest(item, lane, awardScore = true) {
