@@ -32,6 +32,8 @@ const FOOD_PREVIEW_TEXTURES = Object.entries(FOOD_PREVIEW_GLOBS).reduce((acc, [f
 
 const SELECT_DISPLAY_FONT = "'Lilita One', 'Bebas Neue', 'Segoe UI', sans-serif";
 const SELECT_UI_FONT = "'Nunito', 'Rajdhani', 'Segoe UI', sans-serif";
+// Temporary test switch: set to false to restore sequential campaign unlock progression.
+const FORCE_UNLOCK_ALL_LEVELS_FOR_TESTING = true;
 
 export default class LevelSelectScene extends Phaser.Scene {
   constructor() {
@@ -386,6 +388,10 @@ export default class LevelSelectScene extends Phaser.Scene {
   }
 
   isLevelLocked(index) {
+    if (FORCE_UNLOCK_ALL_LEVELS_FOR_TESTING) {
+      return false;
+    }
+
     if (index <= 0) {
       return false;
     }
