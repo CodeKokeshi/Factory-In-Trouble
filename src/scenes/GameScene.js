@@ -3,6 +3,7 @@ import { DEFAULT_LEVEL_ID, getLevelById, getNextCampaignLevelId } from '../data/
 import { markCampaignLevelCompleted } from '../data/campaignProgress';
 import assemblyLineShuffleUrl from '../../assets/audio/music/The_Assembly_Line_Shuffle.mp3';
 import bannersOverPeakUrl from '../../assets/audio/music/Banners_Over_the_Peak.mp3';
+import ratioedInTheLobbyUrl from '../../assets/audio/music/Ratioed_In_The_Lobby.mp3';
 
 const MAX_GAMEPLAY_SPRITES_PER_TYPE = 24;
 const FOOD_RENDER_SIZE = 54;
@@ -37,13 +38,6 @@ const CLAW_TIMING_SCALE = 1.2;
 
 const BELT_LINE_COLOR = 0x0f172a;
 const BELT_LINE_ALPHA = 0.38;
-
-const ASSEMBLY_LINE_SHUFFLE_SEGMENTS = Object.freeze({
-  introStartSec: 0,
-  introEndSec: 12,
-  loopStartSec: 13,
-  loopEndSec: 21
-});
 
 const GAME_DISPLAY_FONT = "'Lilita One', 'Bebas Neue', 'Segoe UI', sans-serif";
 const GAME_UI_FONT = "'Nunito', 'Rajdhani', 'Segoe UI', sans-serif";
@@ -318,11 +312,8 @@ export default class GameScene extends Phaser.Scene {
     this.musicComboRisePulseMs = 0;
     this.musicComboDropPulseMs = 0;
     this.bgmUrl = assemblyLineShuffleUrl;
-    this.bgmSegments = { ...ASSEMBLY_LINE_SHUFFLE_SEGMENTS };
     this.bgmBuffer = null;
     this.bgmLoadPromise = null;
-    this.bgmMonoWave = null;
-    this.bgmResolvedSegments = null;
     this.bgmSourceNode = null;
     this.bgmGainNode = null;
     this.bgmPlaybackState = 'idle';
@@ -334,6 +325,12 @@ export default class GameScene extends Phaser.Scene {
     this.victoryMusicSourceNode = null;
     this.victoryMusicGainNode = null;
     this.victoryMusicPlaybackState = 'idle';
+    this.gameOverMusicUrl = ratioedInTheLobbyUrl;
+    this.gameOverMusicBuffer = null;
+    this.gameOverMusicLoadPromise = null;
+    this.gameOverMusicSourceNode = null;
+    this.gameOverMusicGainNode = null;
+    this.gameOverMusicPlaybackState = 'idle';
     this.lastDraftSelectSfxMs = 0;
     this.lastRumbleAtMs = 0;
 
@@ -933,6 +930,8 @@ export default class GameScene extends Phaser.Scene {
     this.bgmPlaybackState = 'idle';
     this.stopVictoryMusicSource();
     this.victoryMusicPlaybackState = 'idle';
+    this.stopGameOverMusicSource();
+    this.gameOverMusicPlaybackState = 'idle';
     this.levelClearMusicActive = false;
     this.bgmSessionToken += 1;
 
@@ -1128,12 +1127,22 @@ export default class GameScene extends Phaser.Scene {
     this.victoryMusicGainNode.gain.value = 0.0001;
     this.victoryMusicGainNode.connect(this.audioMusicGain);
 
+    this.stopGameOverMusicSource();
+    if (this.gameOverMusicGainNode) {
+      this.gameOverMusicGainNode.disconnect();
+    }
+    this.gameOverMusicGainNode = ctx.createGain();
+    this.gameOverMusicGainNode.gain.value = 0.0001;
+    this.gameOverMusicGainNode.connect(this.audioMusicGain);
+
     this.bgmPlaybackState = 'idle';
     this.victoryMusicPlaybackState = 'idle';
+    this.gameOverMusicPlaybackState = 'idle';
     this.levelClearMusicActive = false;
     this.bgmSessionToken += 1;
     this.loadBgmBuffer();
     this.loadVictoryMusicBuffer();
+    this.loadGameOverMusicBuffer();
 
     this.audioEnabled = true;
     this.audioUnlocked = ctx.state === 'running';
@@ -1210,6 +1219,8 @@ export default class GameScene extends Phaser.Scene {
     this.bgmPlaybackState = 'idle';
     this.stopVictoryMusicSource();
     this.victoryMusicPlaybackState = 'idle';
+    this.stopGameOverMusicSource();
+    this.gameOverMusicPlaybackState = 'idle';
     this.levelClearMusicActive = false;
     this.bgmSessionToken += 1;
 
@@ -1223,6 +1234,11 @@ export default class GameScene extends Phaser.Scene {
       this.victoryMusicGainNode = null;
     }
 
+    if (this.gameOverMusicGainNode) {
+      this.gameOverMusicGainNode.disconnect();
+      this.gameOverMusicGainNode = null;
+    }
+
     this.input.off('pointerdown', this.unlockAudioContext, this);
     this.input.keyboard?.off('keydown', this.unlockAudioContext, this);
     this.input.gamepad?.off('down', this.unlockAudioContext, this);
@@ -1234,10 +1250,6 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (this.bgmBuffer) {
-      if (!this.bgmResolvedSegments) {
-        const baseSegments = this.resolveBgmSegments(this.bgmBuffer.duration);
-        this.bgmResolvedSegments = this.refineBgmLoopSeam(this.bgmBuffer, baseSegments);
-      }
       return Promise.resolve(this.bgmBuffer);
     }
 
@@ -1271,9 +1283,6 @@ export default class GameScene extends Phaser.Scene {
         }
 
         this.bgmBuffer = buffer;
-        this.bgmMonoWave = null;
-        const baseSegments = this.resolveBgmSegments(buffer.duration);
-        this.bgmResolvedSegments = this.refineBgmLoopSeam(buffer, baseSegments);
         return buffer;
       })
       .catch(() => null)
@@ -1333,229 +1342,53 @@ export default class GameScene extends Phaser.Scene {
     return this.victoryMusicLoadPromise;
   }
 
-  resolveBgmSegments(trackDurationSec) {
-    const duration = Math.max(0.2, Number(trackDurationSec) || 0.2);
-
-    const introStartSec = Phaser.Math.Clamp(
-      Number(this.bgmSegments?.introStartSec) || 0,
-      0,
-      Math.max(0, duration - 0.05)
-    );
-    const introEndTarget = Number(this.bgmSegments?.introEndSec) || introStartSec + 0.1;
-    const introEndSec = Phaser.Math.Clamp(
-      Math.max(introStartSec + 0.05, introEndTarget),
-      introStartSec + 0.05,
-      duration
-    );
-
-    const loopStartSec = Phaser.Math.Clamp(
-      Number(this.bgmSegments?.loopStartSec) || introStartSec,
-      0,
-      Math.max(0, duration - 0.05)
-    );
-    const loopEndTarget = Number(this.bgmSegments?.loopEndSec) || duration;
-    const loopEndSec = Phaser.Math.Clamp(
-      Math.max(loopStartSec + 0.05, loopEndTarget),
-      loopStartSec + 0.05,
-      duration
-    );
-
-    const introEndSafe = Phaser.Math.Clamp(
-      Math.max(introEndSec, loopStartSec),
-      introStartSec + 0.05,
-      duration
-    );
-
-    return {
-      introStartSec,
-      introEndSec: introEndSafe,
-      loopStartSec,
-      loopEndSec
-    };
-  }
-
-  getBgmMonoWave(buffer) {
-    if (!buffer || typeof buffer.getChannelData !== 'function') {
-      return null;
+  loadGameOverMusicBuffer() {
+    if (!this.audioCtx || !this.gameOverMusicUrl) {
+      return Promise.resolve(null);
     }
 
-    if (this.bgmMonoWave?.bufferRef === buffer && this.bgmMonoWave?.data) {
-      return this.bgmMonoWave.data;
+    if (this.gameOverMusicBuffer) {
+      return Promise.resolve(this.gameOverMusicBuffer);
     }
 
-    const mono = buffer.getChannelData(0);
-    this.bgmMonoWave = {
-      bufferRef: buffer,
-      data: mono
-    };
-
-    return mono;
-  }
-
-  snapToZeroCrossing(sampleData, targetIndex, radiusSamples = 80) {
-    if (!sampleData || sampleData.length < 3) {
-      return targetIndex;
+    if (this.gameOverMusicLoadPromise) {
+      return this.gameOverMusicLoadPromise;
     }
 
-    const minIndex = Math.max(1, targetIndex - radiusSamples);
-    const maxIndex = Math.min(sampleData.length - 2, targetIndex + radiusSamples);
-
-    let bestIndex = Phaser.Math.Clamp(targetIndex, minIndex, maxIndex);
-    let bestScore = Number.POSITIVE_INFINITY;
-
-    for (let i = minIndex; i <= maxIndex; i += 1) {
-      const prev = sampleData[i - 1];
-      const curr = sampleData[i];
-      const next = sampleData[i + 1];
-      const hasCrossing = (prev <= 0 && curr >= 0) || (prev >= 0 && curr <= 0);
-      const amplitude = Math.abs(curr);
-      const slope = Math.abs(next - prev);
-      const distancePenalty = Math.abs(i - targetIndex) * 0.00001;
-      const score = amplitude + slope * 0.06 + distancePenalty - (hasCrossing ? 0.002 : 0);
-
-      if (score < bestScore) {
-        bestScore = score;
-        bestIndex = i;
-      }
-    }
-
-    return bestIndex;
-  }
-
-  refineBgmLoopSeam(buffer, segments) {
-    if (!buffer || !segments) {
-      return segments;
-    }
-
-    const mono = this.getBgmMonoWave(buffer);
-    const sampleRate = buffer.sampleRate || 44100;
-    if (!mono || mono.length < sampleRate) {
-      return segments;
-    }
-
-    const desiredDurationSec = Phaser.Math.Clamp(
-      segments.loopEndSec - segments.loopStartSec,
-      0.5,
-      Math.max(0.5, buffer.duration - 0.1)
-    );
-    const desiredDurationSamples = Math.floor(desiredDurationSec * sampleRate);
-
-    const startCenter = Math.floor(segments.loopStartSec * sampleRate);
-    const endCenter = Math.floor(segments.loopEndSec * sampleRate);
-
-    const globalRadiusSamples = Math.max(240, Math.floor(sampleRate * 1.15));
-    const endRefineRadiusSamples = Math.max(120, Math.floor(sampleRate * 0.32));
-    const stepSamples = Math.max(96, Math.floor(sampleRate * 0.008));
-    const seamWindowSamples = Phaser.Math.Clamp(Math.floor(sampleRate * 0.075), 1200, 4600);
-    const analysisStride = 6;
-
-    const loopStartMin = Math.max(seamWindowSamples + 2, startCenter - globalRadiusSamples);
-    const loopStartMax = Math.min(mono.length - seamWindowSamples - 4, startCenter + globalRadiusSamples);
-
-    if (loopStartMax <= loopStartMin) {
-      return segments;
-    }
-
-    let bestScore = Number.POSITIVE_INFINITY;
-    let bestStartIndex = startCenter;
-    let bestEndIndex = endCenter;
-
-    for (let startIndex = loopStartMin; startIndex <= loopStartMax; startIndex += stepSamples) {
-      const expectedEnd = startIndex + desiredDurationSamples;
-      const endMin = Math.max(
-        startIndex + seamWindowSamples + 4,
-        expectedEnd - endRefineRadiusSamples,
-        endCenter - globalRadiusSamples
-      );
-      const endMax = Math.min(
-        mono.length - 3,
-        expectedEnd + endRefineRadiusSamples,
-        endCenter + globalRadiusSamples
-      );
-
-      if (endMax <= endMin) {
-        continue;
-      }
-
-      for (let endIndex = endMin; endIndex <= endMax; endIndex += stepSamples) {
-        const endWindowStart = endIndex - seamWindowSamples;
-        if (endWindowStart < 1 || startIndex + seamWindowSamples + 1 >= mono.length) {
-          continue;
+    this.gameOverMusicLoadPromise = fetch(this.gameOverMusicUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Game-over music fetch failed with status ${response.status}`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((arrayBuffer) => {
+        if (!this.audioCtx) {
+          return null;
         }
 
-        let waveDiff = 0;
-        let slopeDiff = 0;
-        let sampleCount = 0;
-
-        for (let offset = 0; offset < seamWindowSamples; offset += analysisStride) {
-          const endSampleIndex = endWindowStart + offset;
-          const startSampleIndex = startIndex + offset;
-
-          const endSample = mono[endSampleIndex];
-          const startSample = mono[startSampleIndex];
-          waveDiff += Math.abs(endSample - startSample);
-
-          const endSlope = endSample - mono[endSampleIndex - 1];
-          const startSlope = startSample - mono[startSampleIndex - 1];
-          slopeDiff += Math.abs(endSlope - startSlope);
-          sampleCount += 1;
+        if (this.audioCtx.decodeAudioData.length <= 1) {
+          return this.audioCtx.decodeAudioData(arrayBuffer.slice(0));
         }
 
-        if (sampleCount <= 0) {
-          continue;
+        return new Promise((resolve, reject) => {
+          this.audioCtx.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+        });
+      })
+      .then((buffer) => {
+        if (!buffer) {
+          return null;
         }
 
-        const edgeJump = Math.abs(mono[endIndex - 1] - mono[startIndex]);
-        const seamCost = (waveDiff / sampleCount) + (slopeDiff / sampleCount) * 0.42 + edgeJump * 0.68;
+        this.gameOverMusicBuffer = buffer;
+        return buffer;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.gameOverMusicLoadPromise = null;
+      });
 
-        const startPenaltySec = Math.abs(startIndex - startCenter) / sampleRate;
-        const endPenaltySec = Math.abs(endIndex - endCenter) / sampleRate;
-        const durationPenaltySec = Math.abs((endIndex - startIndex) - desiredDurationSamples) / sampleRate;
-        const score = seamCost + (startPenaltySec + endPenaltySec) * 0.014 + durationPenaltySec * 0.055;
-
-        if (score < bestScore) {
-          bestScore = score;
-          bestStartIndex = startIndex;
-          bestEndIndex = endIndex;
-        }
-      }
-    }
-
-    if (!Number.isFinite(bestScore)) {
-      return segments;
-    }
-
-    const snapRadiusSamples = Math.max(20, Math.floor(sampleRate * 0.0023));
-    let snappedStartIndex = this.snapToZeroCrossing(mono, bestStartIndex, snapRadiusSamples);
-    let snappedEndIndex = this.snapToZeroCrossing(mono, bestEndIndex, snapRadiusSamples);
-
-    if (snappedEndIndex <= snappedStartIndex + Math.floor(sampleRate * 0.45)) {
-      snappedStartIndex = bestStartIndex;
-      snappedEndIndex = bestEndIndex;
-    }
-
-    const refinedLoopStartSec = Phaser.Math.Clamp(
-      snappedStartIndex / sampleRate,
-      0,
-      Math.max(0, buffer.duration - 0.05)
-    );
-    const refinedLoopEndSec = Phaser.Math.Clamp(
-      snappedEndIndex / sampleRate,
-      refinedLoopStartSec + 0.05,
-      buffer.duration
-    );
-    const refinedIntroEndSec = Phaser.Math.Clamp(
-      Math.max(segments.introEndSec, refinedLoopStartSec),
-      segments.introStartSec + 0.05,
-      buffer.duration
-    );
-
-    return {
-      ...segments,
-      introEndSec: refinedIntroEndSec,
-      loopStartSec: refinedLoopStartSec,
-      loopEndSec: refinedLoopEndSec
-    };
+    return this.gameOverMusicLoadPromise;
   }
 
   ensureBgmPlayback() {
@@ -1579,15 +1412,7 @@ export default class GameScene extends Phaser.Scene {
           return;
         }
 
-        const segments = this.bgmResolvedSegments || this.refineBgmLoopSeam(buffer, this.resolveBgmSegments(buffer.duration));
-        this.bgmResolvedSegments = segments;
-        const introDuration = segments.introEndSec - segments.introStartSec;
-        if (introDuration <= 0.06) {
-          this.startBgmLoopSegment(segments, sessionToken);
-          return;
-        }
-
-        this.playBgmIntroSegment(segments, sessionToken);
+        this.startBgmPlayback(sessionToken);
       })
       .catch(() => {
         if (this.bgmPlaybackState === 'loading') {
@@ -1596,7 +1421,7 @@ export default class GameScene extends Phaser.Scene {
       });
   }
 
-  playBgmIntroSegment(segments, sessionToken) {
+  startBgmPlayback(sessionToken) {
     if (!this.audioCtx || !this.bgmBuffer || !this.bgmGainNode || sessionToken !== this.bgmSessionToken) {
       this.bgmPlaybackState = 'idle';
       return;
@@ -1610,7 +1435,7 @@ export default class GameScene extends Phaser.Scene {
     source.connect(this.bgmGainNode);
 
     this.bgmSourceNode = source;
-    this.bgmPlaybackState = 'intro';
+    this.bgmPlaybackState = 'playing';
 
     source.onended = () => {
       if (this.bgmSourceNode === source) {
@@ -1618,57 +1443,29 @@ export default class GameScene extends Phaser.Scene {
       }
       source.disconnect();
 
-      if (sessionToken !== this.bgmSessionToken || !this.audioCtx || !this.bgmBuffer || !this.bgmGainNode) {
-        this.bgmPlaybackState = 'idle';
+      const canRestart = (
+        sessionToken === this.bgmSessionToken
+        && this.audioCtx
+        && this.bgmBuffer
+        && this.bgmGainNode
+        && this.audioUnlocked
+        && !this.levelClearMusicActive
+        && !this.isGameOver
+      );
+
+      if (!canRestart) {
+        if (this.bgmPlaybackState === 'playing') {
+          this.bgmPlaybackState = 'idle';
+        }
         return;
       }
 
-      this.startBgmLoopSegment(segments, sessionToken);
+      // Restart from the very beginning each time the track ends.
+      this.startBgmPlayback(sessionToken);
     };
 
     try {
-      const introDuration = Math.max(0.05, segments.introEndSec - segments.introStartSec);
-      source.start(this.audioCtx.currentTime + 0.01, segments.introStartSec, introDuration);
-    } catch {
-      this.bgmPlaybackState = 'idle';
-      source.onended = null;
-      source.disconnect();
-      if (this.bgmSourceNode === source) {
-        this.bgmSourceNode = null;
-      }
-    }
-  }
-
-  startBgmLoopSegment(segments, sessionToken) {
-    if (!this.audioCtx || !this.bgmBuffer || !this.bgmGainNode || sessionToken !== this.bgmSessionToken) {
-      this.bgmPlaybackState = 'idle';
-      return;
-    }
-
-    this.stopBgmSource();
-
-    const source = this.audioCtx.createBufferSource();
-    source.buffer = this.bgmBuffer;
-    source.loop = true;
-    source.loopStart = segments.loopStartSec;
-    source.loopEnd = segments.loopEndSec;
-    source.connect(this.bgmGainNode);
-
-    this.bgmSourceNode = source;
-    this.bgmPlaybackState = 'loop';
-
-    source.onended = () => {
-      if (this.bgmSourceNode === source) {
-        this.bgmSourceNode = null;
-      }
-      source.disconnect();
-      if (this.bgmPlaybackState === 'loop') {
-        this.bgmPlaybackState = 'idle';
-      }
-    };
-
-    try {
-      source.start(this.audioCtx.currentTime + 0.01, segments.loopStartSec);
+      source.start(this.audioCtx.currentTime + 0.01, 0);
     } catch {
       this.bgmPlaybackState = 'idle';
       source.onended = null;
@@ -1708,6 +1505,28 @@ export default class GameScene extends Phaser.Scene {
 
     const activeSource = this.victoryMusicSourceNode;
     this.victoryMusicSourceNode = null;
+    activeSource.onended = null;
+
+    try {
+      activeSource.stop(0);
+    } catch {
+      // Source may already be stopped.
+    }
+
+    try {
+      activeSource.disconnect();
+    } catch {
+      // Source may already be disconnected.
+    }
+  }
+
+  stopGameOverMusicSource() {
+    if (!this.gameOverMusicSourceNode) {
+      return;
+    }
+
+    const activeSource = this.gameOverMusicSourceNode;
+    this.gameOverMusicSourceNode = null;
     activeSource.onended = null;
 
     try {
@@ -1767,6 +1586,30 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
+  fadeOutGameOverMusicFast(durationSec = 0.18, stopAfterFade = true) {
+    if (!this.audioCtx || !this.gameOverMusicGainNode) {
+      if (stopAfterFade) {
+        this.stopGameOverMusicSource();
+        this.gameOverMusicPlaybackState = 'idle';
+      }
+      return;
+    }
+
+    const fadeDuration = Phaser.Math.Clamp(durationSec, 0.05, 1.2);
+    const now = this.audioCtx.currentTime;
+    const currentGain = Math.max(0.0001, this.gameOverMusicGainNode.gain.value);
+    this.gameOverMusicGainNode.gain.cancelScheduledValues(now);
+    this.gameOverMusicGainNode.gain.setValueAtTime(currentGain, now);
+    this.gameOverMusicGainNode.gain.exponentialRampToValueAtTime(0.0001, now + fadeDuration);
+
+    if (stopAfterFade) {
+      this.time.delayedCall(Math.round(fadeDuration * 1000) + 24, () => {
+        this.stopGameOverMusicSource();
+        this.gameOverMusicPlaybackState = 'idle';
+      });
+    }
+  }
+
   playVictoryMusicDuringLevelClear() {
     if (!this.audioEnabled || !this.audioUnlocked || !this.audioCtx || !this.victoryMusicGainNode) {
       return;
@@ -1796,45 +1639,190 @@ export default class GameScene extends Phaser.Scene {
 
         this.stopVictoryMusicSource();
 
-        const source = this.audioCtx.createBufferSource();
-        source.buffer = buffer;
-        source.loop = true;
-        source.connect(this.victoryMusicGainNode);
-
         const now = this.audioCtx.currentTime;
         this.victoryMusicGainNode.gain.cancelScheduledValues(now);
         this.victoryMusicGainNode.gain.setValueAtTime(0.0001, now);
         this.victoryMusicGainNode.gain.exponentialRampToValueAtTime(0.95, now + 0.14);
 
-        this.victoryMusicSourceNode = source;
-        this.victoryMusicPlaybackState = 'playing';
-
-        source.onended = () => {
-          if (this.victoryMusicSourceNode === source) {
-            this.victoryMusicSourceNode = null;
-          }
-          source.disconnect();
-          if (this.victoryMusicPlaybackState === 'playing') {
-            this.victoryMusicPlaybackState = 'idle';
-          }
-        };
-
-        try {
-          source.start(now + 0.01, 0);
-        } catch {
-          this.victoryMusicPlaybackState = 'idle';
-          source.onended = null;
-          source.disconnect();
-          if (this.victoryMusicSourceNode === source) {
-            this.victoryMusicSourceNode = null;
-          }
-        }
+        this.startVictoryMusicPlayback(sessionToken, buffer);
       })
       .catch(() => {
         if (this.victoryMusicPlaybackState === 'loading') {
           this.victoryMusicPlaybackState = 'idle';
         }
       });
+  }
+
+  startVictoryMusicPlayback(sessionToken, buffer) {
+    if (
+      !this.audioCtx
+      || !this.victoryMusicGainNode
+      || !buffer
+      || sessionToken !== this.bgmSessionToken
+      || !this.levelClearMusicActive
+      || this.isGameOver
+      || !this.audioUnlocked
+    ) {
+      this.victoryMusicPlaybackState = 'idle';
+      return;
+    }
+
+    this.stopVictoryMusicSource();
+
+    const source = this.audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = false;
+    source.connect(this.victoryMusicGainNode);
+
+    this.victoryMusicSourceNode = source;
+    this.victoryMusicPlaybackState = 'playing';
+
+    source.onended = () => {
+      if (this.victoryMusicSourceNode === source) {
+        this.victoryMusicSourceNode = null;
+      }
+      source.disconnect();
+
+      const canRestart = (
+        sessionToken === this.bgmSessionToken
+        && this.audioCtx
+        && this.victoryMusicGainNode
+        && this.audioUnlocked
+        && this.levelClearMusicActive
+        && !this.isGameOver
+      );
+
+      if (!canRestart) {
+        if (this.victoryMusicPlaybackState === 'playing') {
+          this.victoryMusicPlaybackState = 'idle';
+        }
+        return;
+      }
+
+      // Keep replaying the full track from the beginning while victory state is active.
+      this.startVictoryMusicPlayback(sessionToken, buffer);
+    };
+
+    try {
+      source.start(this.audioCtx.currentTime + 0.01, 0);
+    } catch {
+      this.victoryMusicPlaybackState = 'idle';
+      source.onended = null;
+      source.disconnect();
+      if (this.victoryMusicSourceNode === source) {
+        this.victoryMusicSourceNode = null;
+      }
+    }
+  }
+
+  startGameOverMusicTransition() {
+    this.levelClearMusicActive = false;
+    this.fadeOutAssemblyMusicFast(0.12);
+    this.fadeOutVictoryMusicFast(0.1, true);
+    this.playGameOverMusicDuringDefeat();
+  }
+
+  playGameOverMusicDuringDefeat() {
+    if (!this.audioEnabled || !this.audioUnlocked || !this.audioCtx || !this.gameOverMusicGainNode) {
+      return;
+    }
+
+    if (this.gameOverMusicPlaybackState !== 'idle') {
+      return;
+    }
+
+    this.gameOverMusicPlaybackState = 'loading';
+    const sessionToken = this.bgmSessionToken;
+
+    this.loadGameOverMusicBuffer()
+      .then((buffer) => {
+        if (
+          !buffer
+          || sessionToken !== this.bgmSessionToken
+          || !this.isGameOver
+          || this.sceneTransitioning
+          || !this.audioUnlocked
+          || !this.gameOverMusicGainNode
+        ) {
+          if (this.gameOverMusicPlaybackState === 'loading') {
+            this.gameOverMusicPlaybackState = 'idle';
+          }
+          return;
+        }
+
+        const now = this.audioCtx.currentTime;
+        this.gameOverMusicGainNode.gain.cancelScheduledValues(now);
+        this.gameOverMusicGainNode.gain.setValueAtTime(0.0001, now);
+        this.gameOverMusicGainNode.gain.exponentialRampToValueAtTime(0.95, now + 0.12);
+
+        this.startGameOverMusicPlayback(sessionToken, buffer);
+      })
+      .catch(() => {
+        if (this.gameOverMusicPlaybackState === 'loading') {
+          this.gameOverMusicPlaybackState = 'idle';
+        }
+      });
+  }
+
+  startGameOverMusicPlayback(sessionToken, buffer) {
+    if (
+      !this.audioCtx
+      || !this.gameOverMusicGainNode
+      || !buffer
+      || sessionToken !== this.bgmSessionToken
+      || !this.isGameOver
+      || this.sceneTransitioning
+      || !this.audioUnlocked
+    ) {
+      this.gameOverMusicPlaybackState = 'idle';
+      return;
+    }
+
+    this.stopGameOverMusicSource();
+
+    const source = this.audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = false;
+    source.connect(this.gameOverMusicGainNode);
+
+    this.gameOverMusicSourceNode = source;
+    this.gameOverMusicPlaybackState = 'playing';
+
+    source.onended = () => {
+      if (this.gameOverMusicSourceNode === source) {
+        this.gameOverMusicSourceNode = null;
+      }
+      source.disconnect();
+
+      const canRestart = (
+        sessionToken === this.bgmSessionToken
+        && this.audioCtx
+        && this.gameOverMusicGainNode
+        && this.audioUnlocked
+        && this.isGameOver
+        && !this.sceneTransitioning
+      );
+
+      if (!canRestart) {
+        if (this.gameOverMusicPlaybackState === 'playing') {
+          this.gameOverMusicPlaybackState = 'idle';
+        }
+        return;
+      }
+
+      this.startGameOverMusicPlayback(sessionToken, buffer);
+    };
+
+    try {
+      source.start(this.audioCtx.currentTime + 0.01, 0);
+    } catch {
+      this.gameOverMusicPlaybackState = 'idle';
+      source.onended = null;
+      source.disconnect();
+      if (this.gameOverMusicSourceNode === source) {
+        this.gameOverMusicSourceNode = null;
+      }
+    }
   }
 
   startLevelClearMusicTransition() {
@@ -2405,10 +2393,15 @@ export default class GameScene extends Phaser.Scene {
     this.audioSfxGain.gain.cancelScheduledValues(now);
     this.audioSfxGain.gain.linearRampToValueAtTime(targetSfxGain, now + 0.12);
 
-    const targetMusicGain = this.audioUnlocked && !this.isGameOver
-      ? (this.isDraftActive
-        ? 0.72
-        : Phaser.Math.Clamp(0.96 + pressure * 0.24 + jamLoad * 0.16 + comboEnergy * 0.2 + comboRise * 0.08 - comboDrop * 0.06, 0.82, 1.45))
+    const hasGameOverMusic = this.isGameOver && this.gameOverMusicPlaybackState !== 'idle';
+    const targetMusicGain = this.audioUnlocked && (!this.isGameOver || hasGameOverMusic)
+      ? (
+        hasGameOverMusic
+          ? 0.98
+          : (this.isDraftActive
+            ? 0.72
+            : Phaser.Math.Clamp(0.96 + pressure * 0.24 + jamLoad * 0.16 + comboEnergy * 0.2 + comboRise * 0.08 - comboDrop * 0.06, 0.82, 1.45))
+      )
       : 0.001;
     this.audioMusicGain.gain.cancelScheduledValues(now);
     this.audioMusicGain.gain.linearRampToValueAtTime(targetMusicGain, now + 0.12);
@@ -4230,36 +4223,44 @@ export default class GameScene extends Phaser.Scene {
     this.pauseMenuContainer = container;
   }
 
-  createPauseMenuEntry(container, label, y, accentColor, onSelect) {
+  createPauseMenuEntry(container, label, y, accentColor, onSelect, entryStyle = {}) {
+    const bodyColor = Number.isFinite(entryStyle.bodyColor) ? entryStyle.bodyColor : 0x7a4327;
+    const bodyHoverColor = Number.isFinite(entryStyle.bodyHoverColor) ? entryStyle.bodyHoverColor : 0x915131;
+    const glossAlpha = Number.isFinite(entryStyle.glossAlpha)
+      ? Phaser.Math.Clamp(entryStyle.glossAlpha, 0, 1)
+      : 0.14;
+    const textColor = typeof entryStyle.textColor === 'string' ? entryStyle.textColor : '#fff4e8';
+    const textShadowColor = typeof entryStyle.textShadowColor === 'string' ? entryStyle.textShadowColor : '#6b3418';
+
     const entry = this.add.container(640, y);
 
     const shadowMid = this.add.rectangle(0, 7, 340, 68, 0x1b0905, 0.42);
     const shadowLeft = this.add.circle(-170, 7, 34, 0x1b0905, 0.42);
     const shadowRight = this.add.circle(170, 7, 34, 0x1b0905, 0.42);
 
-    const bodyMid = this.add.rectangle(0, 0, 340, 68, 0x7a4327, 1);
-    const bodyLeft = this.add.circle(-170, 0, 34, 0x7a4327, 1);
-    const bodyRight = this.add.circle(170, 0, 34, 0x7a4327, 1);
-    const glossMid = this.add.rectangle(0, -14, 312, 20, 0xffffff, 0.14);
-    const glossLeft = this.add.circle(-156, -14, 10, 0xffffff, 0.14);
-    const glossRight = this.add.circle(156, -14, 10, 0xffffff, 0.14);
+    const bodyMid = this.add.rectangle(0, 0, 340, 68, bodyColor, 1);
+    const bodyLeft = this.add.circle(-170, 0, 34, bodyColor, 1);
+    const bodyRight = this.add.circle(170, 0, 34, bodyColor, 1);
+    const glossMid = this.add.rectangle(0, -14, 312, 20, 0xffffff, glossAlpha);
+    const glossLeft = this.add.circle(-156, -14, 10, 0xffffff, glossAlpha);
+    const glossRight = this.add.circle(156, -14, 10, 0xffffff, glossAlpha);
     const accentDot = this.add.circle(-142, 0, 8, accentColor, 1);
 
     const text = this.add
       .text(0, 0, label, {
         fontFamily: GAME_DISPLAY_FONT,
         fontSize: '42px',
-        color: '#fff4e8',
+          color: textColor,
         align: 'center'
       })
       .setOrigin(0.5)
       .setLetterSpacing(1.2)
-      .setShadow(0, 2, '#6b3418', 4);
+      .setShadow(0, 2, textShadowColor, 4);
 
     const hitArea = this.add.zone(0, 0, 390, 84).setInteractive({ useHandCursor: true });
 
     const setHighlighted = (highlighted) => {
-      const fill = highlighted ? 0x915131 : 0x7a4327;
+      const fill = highlighted ? bodyHoverColor : bodyColor;
       bodyMid.setFillStyle(fill, 1);
       bodyLeft.setFillStyle(fill, 1);
       bodyRight.setFillStyle(fill, 1);
@@ -4881,63 +4882,174 @@ export default class GameScene extends Phaser.Scene {
     return mainIsStuck;
   }
 
+  runGameOverExplosionSequence() {
+    const burstColors = [0xef4444, 0xf97316, 0xfb7185, 0xf59e0b];
+    const burstCount = 14;
+
+    for (let i = 0; i < burstCount; i += 1) {
+      const delayMs = 40 + i * 55 + Phaser.Math.Between(0, 70);
+      this.time.delayedCall(delayMs, () => {
+        if (!this.isGameOver || this.sceneTransitioning) {
+          return;
+        }
+
+        const x = Phaser.Math.Between(170, 1110);
+        const y = Phaser.Math.Between(116, 616);
+        const color = burstColors[Phaser.Math.Between(0, burstColors.length - 1)];
+        const intensity = Phaser.Math.FloatBetween(0.34, 0.72);
+
+        this.emitShockRing(x, y, color, Phaser.Math.FloatBetween(1.35, 2.7), Phaser.Math.Between(160, 300));
+        this.emitTransferParticles(x, y, color, Phaser.Math.Between(9, 18));
+        this.playImpactFx(intensity, color);
+
+        if (Math.random() < 0.58) {
+          this.playSfx('jam', Phaser.Math.FloatBetween(0.78, 1.18));
+        }
+      });
+    }
+  }
+
   triggerGameOver() {
-    if (this.isGameOver) {
+    if (this.isGameOver || this.sceneTransitioning || this.levelComplete) {
       return;
     }
 
     this.isGameOver = true;
+    this.levelClearMusicActive = false;
+    this.pauseTransitionLock = false;
     this.closeCardDraft();
     this.setSlowMotion(false);
     this.abortActiveDrag();
+    this.startGameOverMusicTransition();
     this.playImpactFx(1.35, 0xef4444);
     this.playSfx('game-over', 1.2);
     this.emitShockRing(640, 360, 0xef4444, 3.8, 350);
     this.rumble(0.7, 0.5, 260);
 
-    this.gameOverOverlay = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.72).setDepth(380);
-    this.gameOverText = this.add
-      .text(640, 322, `LINE JAMMED\n${this.levelName}\n${this.score}`, {
-        fontFamily: GAME_DISPLAY_FONT,
-        fontSize: '52px',
-        align: 'center',
-        color: '#ffe5dc'
-      })
-      .setOrigin(0.5)
-      .setDepth(390)
-      .setShadow(0, 4, '#000000', 12);
+    if (this.pauseButtonBody?.input?.enabled) {
+      this.pauseButtonBody.disableInteractive();
+    }
+    if (this.pauseButtonContainer?.active) {
+      this.tweens.killTweensOf(this.pauseButtonContainer);
+      this.tweens.add({
+        targets: this.pauseButtonContainer,
+        alpha: 0,
+        duration: 120,
+        ease: 'Quad.Out'
+      });
+    }
 
-    this.gameOverText.setAlpha(0);
-    this.tweens.add({
-      targets: this.gameOverText,
-      alpha: 1,
-      duration: 240,
-      ease: 'Quad.Out'
+    this.cameras.main.shake(420, 0.0065, true);
+    this.runGameOverExplosionSequence();
+
+    const container = this.add.container(0, 0).setDepth(390);
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.76).setInteractive();
+    scrim.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
     });
 
-    const returnToMenu = this.levelMode === 'endless';
-    const gameOverReturnText = returnToMenu
-      ? 'Main Menu'
-      : 'Campaign';
+    const glowTop = this.add.circle(640, 130, 260, 0xef4444, 0.16).setBlendMode(Phaser.BlendModes.ADD);
+    const glowBottom = this.add.circle(640, 575, 300, 0xb91c1c, 0.11).setBlendMode(Phaser.BlendModes.ADD);
 
-    this.add
-      .text(640, 450, gameOverReturnText, {
-        fontFamily: GAME_UI_FONT,
-        fontSize: '30px',
-        align: 'center',
-        color: '#ffd8ad'
+    const panelShadow = this.add.rectangle(640, 364, 472, 412, 0x140307, 0.58);
+    const panel = this.add.rectangle(640, 356, 472, 412, 0x4e1a1f, 0.97).setStrokeStyle(2, 0xf5a3ab, 0.95);
+    const topStrip = this.add.rectangle(640, 205, 430, 36, 0xffd1d1, 0.14);
+
+    const jammedLabel = this.add
+      .text(640, 208, 'LINE JAMMED', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '56px',
+        color: '#fff1f3',
+        align: 'center'
       })
       .setOrigin(0.5)
-      .setDepth(391);
+      .setLetterSpacing(1.6)
+      .setShadow(0, 3, '#000000', 10);
 
-    this.time.delayedCall(1900, () => {
-      if (returnToMenu) {
-        this.scene.start('MainMenuScene');
+    const scoreLabel = this.add
+      .text(640, 286, `SCORE ${this.score}`, {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '34px',
+        align: 'center',
+        color: '#ffd7dc'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(0.8);
+
+    container.add([scrim, glowTop, glowBottom, panelShadow, panel, topStrip, jammedLabel, scoreLabel]);
+
+    const returnToMenu = this.levelMode === 'endless';
+
+    const restartAction = () => {
+      if (this.sceneTransitioning) {
         return;
       }
 
-      this.scene.start('LevelSelectScene', { selectedLevelId: this.levelId });
+      this.sceneTransitioning = true;
+      this.fadeOutGameOverMusicFast(0.16, false);
+      this.playSceneWipeTransition(() => {
+        this.stopGameOverMusicSource();
+        this.gameOverMusicPlaybackState = 'idle';
+        this.startLoadingGameplay(this.levelId, 'Restarting Shift');
+      });
+    };
+
+    const exitAction = () => {
+      if (this.sceneTransitioning) {
+        return;
+      }
+
+      this.sceneTransitioning = true;
+      this.fadeOutGameOverMusicFast(0.16, false);
+      this.playSceneWipeTransition(() => {
+        this.stopGameOverMusicSource();
+        this.gameOverMusicPlaybackState = 'idle';
+
+        if (returnToMenu) {
+          this.scene.start('MainMenuScene');
+          return;
+        }
+
+        this.scene.start('LevelSelectScene', { selectedLevelId: this.levelId });
+      });
+    };
+
+    const gameOverEntryStyle = {
+      bodyColor: 0x6b2a31,
+      bodyHoverColor: 0x82404a,
+      glossAlpha: 0.11,
+      textColor: '#fff2f4',
+      textShadowColor: '#3a1013'
+    };
+
+    this.createPauseMenuEntry(container, 'Restart', 374, 0xf97316, restartAction, gameOverEntryStyle);
+    this.createPauseMenuEntry(container, 'Exit', 456, 0xfb7185, exitAction, gameOverEntryStyle);
+
+    container.setAlpha(0);
+    panel.setScale(0.95);
+
+    this.time.delayedCall(360, () => {
+      if (!container.active) {
+        return;
+      }
+
+      this.tweens.add({
+        targets: [container, panel],
+        alpha: 1,
+        duration: 160,
+        ease: 'Quad.Out'
+      });
+      this.tweens.add({
+        targets: panel,
+        scaleX: 1,
+        scaleY: 1,
+        duration: 190,
+        ease: 'Back.Out'
+      });
     });
+
+    this.gameOverOverlay = scrim;
+    this.gameOverText = jammedLabel;
   }
 
   createFactoryVisuals() {
