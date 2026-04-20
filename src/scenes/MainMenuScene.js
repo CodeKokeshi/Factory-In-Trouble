@@ -760,6 +760,19 @@ export default class MainMenuScene extends Phaser.Scene {
       return;
     }
 
+    if (sceneKey === 'GameScene') {
+      this.keepMusicForCampaign = false;
+      this.fadeOutMenuMusic(0.18, () => {
+        this.scene.start('LoadingScene', {
+          targetSceneKey: 'GameScene',
+          targetData: data,
+          loadingLabel: 'Heating Up The Line',
+          readyLabel: 'Shift Ready'
+        });
+      });
+      return;
+    }
+
     this.keepMusicForCampaign = false;
     this.fadeOutMenuMusic(0.18, () => {
       this.scene.start(sceneKey, data);

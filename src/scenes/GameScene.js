@@ -5,27 +5,35 @@ import assemblyLineShuffleUrl from '../../assets/audio/music/The_Assembly_Line_S
 import bannersOverPeakUrl from '../../assets/audio/music/Banners_Over_the_Peak.mp3';
 
 const MAX_GAMEPLAY_SPRITES_PER_TYPE = 24;
-const FOOD_RENDER_SIZE = 42;
+const FOOD_RENDER_SIZE = 54;
+const FOOD_SPACING_PADDING = 12;
 
-const MAIN_BELT_WIDTH = 56;
+const MAIN_BELT_WIDTH = 74;
 const MAIN_BELT_HEIGHT = 560;
-const SIDE_BELT_HEIGHT = 26;
+const SIDE_BELT_HEIGHT = 34;
 
-const CLAW_OFFSET_X = 38;
-const CLAW_RADIUS = 12;
-const CLAW_CLEARANCE = 2;
+const CLAW_OFFSET_X = 44;
+const CLAW_RADIUS = 14;
+const CLAW_CLEARANCE = 3;
 const SIDE_BELT_INTAKE_OFFSET = CLAW_OFFSET_X + CLAW_RADIUS + CLAW_CLEARANCE;
 
-const CLAW_ARM_LENGTH = 22;
-const CLAW_JAW_LENGTH = 12;
-const CLAW_JAW_SPREAD = 10;
+const CLAW_ARM_LENGTH = 26;
+const CLAW_JAW_LENGTH = 14;
+const CLAW_JAW_SPREAD = 12;
 
-const CHEST_PICKUP_BUFFER = 16;
+const CHEST_PICKUP_BUFFER = 22;
 const STANDARD_CHEST_OFFSET_X = 80;
 const CHEST_BUBBLE_SWAP_INTERVAL_MS = 900;
-const CHEST_BUBBLE_ICON_SIZE = 28;
+const CHEST_BUBBLE_ICON_SIZE = 32;
 const SPACING_RULE_LEVEL_START = 6;
 const SPACING_RULE_LEVEL_END = 12;
+
+const GLOBAL_FLOW_SPEED_SCALE = 0.78;
+const GLOBAL_SPAWN_INTERVAL_SCALE = 1.38;
+const GLOBAL_SCORE_RAMP_STEP_SCALE = 1.28;
+const GLOBAL_SPEED_RAMP_SCALE = 0.78;
+const GLOBAL_SPAWN_RAMP_SCALE = 0.8;
+const CLAW_TIMING_SCALE = 1.2;
 
 const BELT_LINE_COLOR = 0x0f172a;
 const BELT_LINE_ALPHA = 0.38;
@@ -199,6 +207,7 @@ export default class GameScene extends Phaser.Scene {
     this.layoutUsesMainBelt = true;
     this.directLaneSpawn = false;
     this.showTransferClaws = true;
+    this.loadingToken = null;
     this.isFiniteLevel = false;
     this.levelQuota = null;
     this.levelComplete = false;
@@ -225,7 +234,7 @@ export default class GameScene extends Phaser.Scene {
     this.mainSpeed = this.baseMainSpeed;
     this.sideSpeed = this.baseSideSpeed;
     this.spawnIntervalMs = this.baseSpawnIntervalMs;
-    this.itemSpacing = FOOD_RENDER_SIZE + 4;
+    this.itemSpacing = FOOD_RENDER_SIZE + FOOD_SPACING_PADDING;
 
     this.defaultTuning = {
       baseMainSpeed: this.baseMainSpeed,
@@ -265,6 +274,13 @@ export default class GameScene extends Phaser.Scene {
     this.transferParticles = null;
 
     this.isGameOver = false;
+    this.isPaused = false;
+    this.sceneTransitioning = false;
+    this.pauseTransitionLock = false;
+    this.pauseButtonContainer = null;
+    this.pauseButtonBody = null;
+    this.pauseButtonBars = [];
+    this.pauseMenuContainer = null;
     this.clogTimerSeconds = 0;
     this.clogGraceSeconds = 1.4;
     this.gameOverOverlay = null;
@@ -422,6 +438,8 @@ export default class GameScene extends Phaser.Scene {
   }
 
   init(data) {
+    this.loadingToken = typeof data?.loadingToken === 'string' ? data.loadingToken : null;
+
     const levelId = typeof data?.levelId === 'string' ? data.levelId : DEFAULT_LEVEL_ID;
     const levelConfig = getLevelById(levelId);
 
@@ -500,6 +518,18 @@ export default class GameScene extends Phaser.Scene {
       spawnProfile.spawnIntervalDecreasePerStepMs,
       this.defaultTuning.spawnIntervalDecreasePerStepMs
     );
+
+    this.baseMainSpeed = Math.max(12, this.baseMainSpeed * GLOBAL_FLOW_SPEED_SCALE);
+    this.baseSideSpeed = Math.max(12, this.baseSideSpeed * GLOBAL_FLOW_SPEED_SCALE);
+    this.maxMainSpeed = Math.max(this.baseMainSpeed + 20, this.maxMainSpeed * GLOBAL_FLOW_SPEED_SCALE);
+    this.maxSideSpeed = Math.max(this.baseSideSpeed + 20, this.maxSideSpeed * GLOBAL_FLOW_SPEED_SCALE);
+
+    this.baseSpawnIntervalMs = Math.max(100, this.baseSpawnIntervalMs * GLOBAL_SPAWN_INTERVAL_SCALE);
+    this.minSpawnIntervalMs = Math.max(60, this.minSpawnIntervalMs * GLOBAL_SPAWN_INTERVAL_SCALE);
+    this.scoreRampStepPoints = Math.max(1, this.scoreRampStepPoints * GLOBAL_SCORE_RAMP_STEP_SCALE);
+    this.mainSpeedPerStep = Math.max(0, this.mainSpeedPerStep * GLOBAL_SPEED_RAMP_SCALE);
+    this.sideSpeedPerStep = Math.max(0, this.sideSpeedPerStep * GLOBAL_SPEED_RAMP_SCALE);
+    this.spawnIntervalDecreasePerStepMs = Math.max(0, this.spawnIntervalDecreasePerStepMs * GLOBAL_SPAWN_RAMP_SCALE);
 
     this.baseSpawnIntervalMs = Math.max(100, this.baseSpawnIntervalMs);
     this.minSpawnIntervalMs = Phaser.Math.Clamp(this.minSpawnIntervalMs, 60, this.baseSpawnIntervalMs);
@@ -845,6 +875,13 @@ export default class GameScene extends Phaser.Scene {
     this.comboMilestoneTier = 0;
 
     this.isGameOver = false;
+    this.isPaused = false;
+    this.sceneTransitioning = false;
+    this.pauseTransitionLock = false;
+    this.pauseButtonContainer = null;
+    this.pauseButtonBody = null;
+    this.pauseButtonBars = [];
+    this.pauseMenuContainer = null;
     this.levelComplete = false;
     this.clogTimerSeconds = 0;
     this.gameOverOverlay = null;
@@ -912,10 +949,14 @@ export default class GameScene extends Phaser.Scene {
 
   preload() {
     if (CHEST_CLOSED_URL) {
-      this.load.image(CHEST_CLOSED_KEY, CHEST_CLOSED_URL);
+      if (!this.textures.exists(CHEST_CLOSED_KEY)) {
+        this.load.image(CHEST_CLOSED_KEY, CHEST_CLOSED_URL);
+      }
     }
     if (CHEST_OPENED_URL) {
-      this.load.image(CHEST_OPENED_KEY, CHEST_OPENED_URL);
+      if (!this.textures.exists(CHEST_OPENED_KEY)) {
+        this.load.image(CHEST_OPENED_KEY, CHEST_OPENED_URL);
+      }
     }
 
     const textureKeyByUrl = new Map();
@@ -925,7 +966,9 @@ export default class GameScene extends Phaser.Scene {
 
       food.spriteUrls.forEach((url, index) => {
         const textureKey = `food_${food.id}_${index}`;
-        this.load.image(textureKey, url);
+        if (!this.textures.exists(textureKey)) {
+          this.load.image(textureKey, url);
+        }
         this.textureKeysByFoodId[food.id].push(textureKey);
         textureKeyByUrl.set(url, textureKey);
       });
@@ -942,7 +985,9 @@ export default class GameScene extends Phaser.Scene {
         }
 
         const textureKey = `food_chest_bubble_${foodId}_${index}`;
-        this.load.image(textureKey, url);
+        if (!this.textures.exists(textureKey)) {
+          this.load.image(textureKey, url);
+        }
         this.chestBubbleTextureKeysByFoodId[foodId].push(textureKey);
         textureKeyByUrl.set(url, textureKey);
       });
@@ -954,9 +999,15 @@ export default class GameScene extends Phaser.Scene {
     this.createSceneJuiceLayer();
     this.initAudioSystem();
     this.createScoreUi();
+    this.createPauseUi();
     this.createCardSystem();
     this.createParticles();
     this.setupGrabControls();
+    this.game.events.emit('scene-ready:GameScene', {
+      loadingToken: this.loadingToken,
+      levelId: this.levelId
+    });
+    this.loadingToken = null;
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.handleSceneShutdown, this);
     this.events.once(Phaser.Scenes.Events.DESTROY, this.handleSceneShutdown, this);
@@ -1147,6 +1198,14 @@ export default class GameScene extends Phaser.Scene {
   }
 
   handleSceneShutdown() {
+    this.isPaused = false;
+    this.sceneTransitioning = false;
+    this.pauseTransitionLock = false;
+    this.pauseButtonContainer = null;
+    this.pauseButtonBody = null;
+    this.pauseButtonBars = [];
+    this.pauseMenuContainer = null;
+
     this.stopBgmSource();
     this.bgmPlaybackState = 'idle';
     this.stopVictoryMusicSource();
@@ -3437,26 +3496,38 @@ export default class GameScene extends Phaser.Scene {
       .setLetterSpacing(0.7)
       .setAlpha(0);
 
+    const nameWrapWidth = width - 42;
+    const baseNameFontSize = 36;
+    const minNameFontSize = 30;
+
     const name = this.add
-      .text(x - width * 0.5 + 18, y - 58, card.name, {
+      .text(x, y - 46, card.name, {
         fontFamily: GAME_UI_FONT,
-        fontSize: '38px',
+        fontSize: `${baseNameFontSize}px`,
         color: '#fff8ec',
-        align: 'left',
-        wordWrap: { width: width - 34 }
+        align: 'center',
+        wordWrap: { width: nameWrapWidth }
       })
-      .setOrigin(0, 0.5)
+      .setOrigin(0.5, 0.5)
       .setAlpha(0);
 
+    let fittedNameFontSize = baseNameFontSize;
+    let wrappedNameLines = name.getWrappedText(card.name);
+    while (wrappedNameLines.length > 1 && fittedNameFontSize > minNameFontSize) {
+      fittedNameFontSize -= 1;
+      name.setFontSize(`${fittedNameFontSize}px`);
+      wrappedNameLines = name.getWrappedText(card.name);
+    }
+
     const description = this.add
-      .text(x - width * 0.5 + 18, y + 18, card.description, {
+      .text(x, y + 18, card.description, {
         fontFamily: GAME_UI_FONT,
-        fontSize: '22px',
+        fontSize: '20px',
         color: '#ffe2c5',
-        align: 'left',
-        wordWrap: { width: width - 34 }
+        align: 'center',
+        wordWrap: { width: width - 42 }
       })
-      .setOrigin(0, 0.5)
+      .setOrigin(0.5, 0.5)
       .setAlpha(0);
 
     cardBg.on('pointerover', () => {
@@ -4009,6 +4080,361 @@ export default class GameScene extends Phaser.Scene {
     this.refreshScoreUi();
   }
 
+  createPauseUi() {
+    const container = this.add.container(640, 46).setDepth(305);
+    const shadow = this.add.circle(0, 3, 25, 0x1b0905, 0.42);
+    const body = this.add
+      .circle(0, 0, 24, 0x4a2012, 0.98)
+      .setStrokeStyle(2, 0xf0bd85, 1)
+      .setInteractive({ useHandCursor: true });
+    const gloss = this.add.ellipse(0, -8, 30, 11, 0xffffff, 0.2);
+    const leftBar = this.add.rectangle(-5.5, 0, 4, 14, 0xfff0dc, 1);
+    const rightBar = this.add.rectangle(5.5, 0, 4, 14, 0xfff0dc, 1);
+
+    container.add([shadow, body, gloss, leftBar, rightBar]);
+
+    body.on('pointerover', () => {
+      if (this.isPaused || this.pauseTransitionLock || this.isGameOver || this.levelComplete || this.isDraftActive) {
+        return;
+      }
+
+      this.tweens.killTweensOf(container);
+      this.tweens.add({
+        targets: container,
+        scaleX: 1.08,
+        scaleY: 1.08,
+        duration: 90,
+        ease: 'Quad.Out'
+      });
+    });
+
+    body.on('pointerout', () => {
+      this.tweens.killTweensOf(container);
+      this.tweens.add({
+        targets: container,
+        scaleX: 1,
+        scaleY: 1,
+        duration: 110,
+        ease: 'Quad.Out'
+      });
+    });
+
+    body.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+      this.handlePauseButtonPressed();
+    });
+
+    this.pauseButtonContainer = container;
+    this.pauseButtonBody = body;
+    this.pauseButtonBars = [leftBar, rightBar];
+  }
+
+  handlePauseButtonPressed() {
+    if (
+      this.isPaused
+      || this.pauseTransitionLock
+      || this.isGameOver
+      || this.levelComplete
+      || this.isDraftActive
+    ) {
+      return;
+    }
+
+    this.pauseTransitionLock = true;
+    this.isPaused = true;
+    this.abortActiveDrag();
+
+    if (!this.pauseButtonContainer?.active) {
+      this.pauseTransitionLock = false;
+      this.openPauseMenu();
+      return;
+    }
+
+    this.tweens.killTweensOf(this.pauseButtonContainer);
+    this.pauseButtonBars.forEach((bar) => this.tweens.killTweensOf(bar));
+
+    this.tweens.add({
+      targets: this.pauseButtonContainer,
+      scaleX: 0.86,
+      scaleY: 0.86,
+      duration: 85,
+      yoyo: true,
+      ease: 'Quad.Out',
+      onComplete: () => {
+        this.openPauseMenu();
+        this.pauseTransitionLock = false;
+      }
+    });
+
+    this.tweens.add({
+      targets: this.pauseButtonBars,
+      scaleY: 0.72,
+      duration: 85,
+      yoyo: true,
+      ease: 'Quad.Out'
+    });
+  }
+
+  openPauseMenu() {
+    if (!this.isPaused || this.pauseMenuContainer?.active) {
+      return;
+    }
+
+    const container = this.add.container(0, 0).setDepth(370);
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.72).setInteractive();
+    scrim.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+    });
+
+    const glowTop = this.add.circle(640, 130, 240, 0xf59e0b, 0.14).setBlendMode(Phaser.BlendModes.ADD);
+    const glowBottom = this.add.circle(640, 575, 280, 0x34d399, 0.1).setBlendMode(Phaser.BlendModes.ADD);
+
+    const panelShadow = this.add.rectangle(640, 364, 472, 412, 0x1b0905, 0.52);
+    const panel = this.add.rectangle(640, 356, 472, 412, 0x4a2012, 0.97).setStrokeStyle(2, 0xf0bd85, 1);
+    const topStrip = this.add.rectangle(640, 205, 430, 36, 0xffffff, 0.14);
+
+    const pausedLabel = this.add
+      .text(640, 208, 'Paused', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '56px',
+        color: '#fff0d9',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(1.6)
+      .setShadow(0, 3, '#000000', 10);
+
+    container.add([scrim, glowTop, glowBottom, panelShadow, panel, topStrip, pausedLabel]);
+
+    this.createPauseMenuEntry(container, 'Resume', 290, 0x34d399, () => this.resumeFromPause());
+    this.createPauseMenuEntry(container, 'Restart', 372, 0xf59e0b, () => this.restartFromPause());
+    this.createPauseMenuEntry(container, 'Exit', 454, 0xfb7185, () => this.exitFromPause());
+
+    container.setAlpha(0);
+    panel.setScale(0.95);
+
+    this.tweens.add({
+      targets: [container, panel],
+      alpha: 1,
+      duration: 160,
+      ease: 'Quad.Out'
+    });
+    this.tweens.add({
+      targets: panel,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 190,
+      ease: 'Back.Out'
+    });
+
+    this.pauseMenuContainer = container;
+  }
+
+  createPauseMenuEntry(container, label, y, accentColor, onSelect) {
+    const entry = this.add.container(640, y);
+
+    const shadowMid = this.add.rectangle(0, 7, 340, 68, 0x1b0905, 0.42);
+    const shadowLeft = this.add.circle(-170, 7, 34, 0x1b0905, 0.42);
+    const shadowRight = this.add.circle(170, 7, 34, 0x1b0905, 0.42);
+
+    const bodyMid = this.add.rectangle(0, 0, 340, 68, 0x7a4327, 1);
+    const bodyLeft = this.add.circle(-170, 0, 34, 0x7a4327, 1);
+    const bodyRight = this.add.circle(170, 0, 34, 0x7a4327, 1);
+    const glossMid = this.add.rectangle(0, -14, 312, 20, 0xffffff, 0.14);
+    const glossLeft = this.add.circle(-156, -14, 10, 0xffffff, 0.14);
+    const glossRight = this.add.circle(156, -14, 10, 0xffffff, 0.14);
+    const accentDot = this.add.circle(-142, 0, 8, accentColor, 1);
+
+    const text = this.add
+      .text(0, 0, label, {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '42px',
+        color: '#fff4e8',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(1.2)
+      .setShadow(0, 2, '#6b3418', 4);
+
+    const hitArea = this.add.zone(0, 0, 390, 84).setInteractive({ useHandCursor: true });
+
+    const setHighlighted = (highlighted) => {
+      const fill = highlighted ? 0x915131 : 0x7a4327;
+      bodyMid.setFillStyle(fill, 1);
+      bodyLeft.setFillStyle(fill, 1);
+      bodyRight.setFillStyle(fill, 1);
+      accentDot.setScale(highlighted ? 1.24 : 1);
+      text.setScale(highlighted ? 1.03 : 1);
+    };
+
+    hitArea.on('pointerover', () => {
+      if (this.pauseTransitionLock) {
+        return;
+      }
+      setHighlighted(true);
+    });
+
+    hitArea.on('pointerout', () => {
+      setHighlighted(false);
+    });
+
+    hitArea.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+      if (this.pauseTransitionLock) {
+        return;
+      }
+
+      this.pauseTransitionLock = true;
+      this.tweens.killTweensOf(entry);
+      this.tweens.add({
+        targets: entry,
+        scaleX: 0.94,
+        scaleY: 0.94,
+        duration: 80,
+        yoyo: true,
+        ease: 'Quad.Out',
+        onComplete: () => {
+          onSelect();
+        }
+      });
+    });
+
+    entry.add([
+      shadowMid,
+      shadowLeft,
+      shadowRight,
+      bodyMid,
+      bodyLeft,
+      bodyRight,
+      glossMid,
+      glossLeft,
+      glossRight,
+      accentDot,
+      text,
+      hitArea
+    ]);
+    container.add(entry);
+
+    entry.setAlpha(0);
+    entry.y += 10;
+    this.tweens.add({
+      targets: entry,
+      alpha: 1,
+      y: y,
+      duration: 160,
+      ease: 'Quad.Out'
+    });
+
+    return entry;
+  }
+
+  closePauseMenu(animate = true, onComplete = null) {
+    const complete = () => {
+      this.pauseMenuContainer = null;
+      if (typeof onComplete === 'function') {
+        onComplete();
+      }
+    };
+
+    const menu = this.pauseMenuContainer;
+    if (!menu?.active) {
+      complete();
+      return;
+    }
+
+    if (!animate) {
+      menu.destroy(true);
+      complete();
+      return;
+    }
+
+    this.tweens.add({
+      targets: menu,
+      alpha: 0,
+      duration: 140,
+      ease: 'Quad.In',
+      onComplete: () => {
+        menu.destroy(true);
+        complete();
+      }
+    });
+  }
+
+  resumeFromPause() {
+    if (!this.isPaused) {
+      this.pauseTransitionLock = false;
+      return;
+    }
+
+    this.closePauseMenu(true, () => {
+      this.isPaused = false;
+      this.pauseTransitionLock = false;
+    });
+  }
+
+  restartFromPause() {
+    if (this.sceneTransitioning) {
+      return;
+    }
+
+    this.isPaused = false;
+    this.sceneTransitioning = true;
+    this.closePauseMenu(false, () => {
+      this.playSceneWipeTransition(() => {
+        this.pauseTransitionLock = false;
+        this.startLoadingGameplay(this.levelId, 'Restarting Shift');
+      });
+    });
+  }
+
+  exitFromPause() {
+    if (this.sceneTransitioning) {
+      return;
+    }
+
+    this.isPaused = false;
+    this.closePauseMenu(false, () => {
+      this.pauseTransitionLock = false;
+
+      if (this.levelMode === 'endless') {
+        this.scene.start('MainMenuScene');
+        return;
+      }
+
+      this.scene.start('LevelSelectScene', { selectedLevelId: this.levelId });
+    });
+  }
+
+  playSceneWipeTransition(onComplete = null, options = {}) {
+    const wipeColor = Number.isFinite(options.color) ? options.color : 0x1b0905;
+    const accentColor = Number.isFinite(options.accentColor) ? options.accentColor : 0xf59e0b;
+    const durationMs = Phaser.Math.Clamp(Number(options.durationMs) || 250, 120, 700);
+
+    const wipe = this.add.rectangle(0, 360, 0, 720, wipeColor, 1).setOrigin(0, 0.5).setDepth(460);
+    const accent = this.add.rectangle(0, 360, 0, 720, accentColor, 0.14).setOrigin(0, 0.5).setDepth(461);
+
+    this.tweens.add({
+      targets: [wipe, accent],
+      displayWidth: 1280,
+      duration: durationMs,
+      ease: 'Cubic.In',
+      onComplete: () => {
+        if (typeof onComplete === 'function') {
+          onComplete();
+        }
+      }
+    });
+  }
+
+  startLoadingGameplay(levelId, loadingLabel = 'Prepping Shift') {
+    this.scene.start('LoadingScene', {
+      targetSceneKey: 'GameScene',
+      targetData: { levelId },
+      loadingLabel,
+      readyLabel: 'Shift Ready'
+    });
+  }
+
   refreshScoreUi() {
     if (this.levelInfoText) {
       this.levelInfoText.setText(this.levelName);
@@ -4121,6 +4547,10 @@ export default class GameScene extends Phaser.Scene {
     this.updateAudio(delta);
     this.updateChestBubbleSlideshows(delta);
 
+    if (this.isPaused) {
+      return;
+    }
+
     if (this.isGameOver || this.levelComplete) {
       this.updateEffectHud();
       this.updateSceneJuice(delta);
@@ -4216,57 +4646,203 @@ export default class GameScene extends Phaser.Scene {
     this.rumble(0.36, 0.22, 180);
     this.startLevelClearMusicTransition();
 
-    this.levelResultOverlay = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.68).setDepth(380);
-    this.levelResultText = this.add
-      .text(640, 330, `SHIFT CLEAR\n${this.levelName}\n${this.acceptedCount}/${this.levelQuota}`, {
-        fontFamily: GAME_DISPLAY_FONT,
-        fontSize: '54px',
-        align: 'center',
-        color: '#ffeed6'
-      })
-      .setOrigin(0.5)
-      .setDepth(390)
-      .setShadow(0, 4, '#000000', 12);
-
-    this.levelResultText.setAlpha(0);
-    this.tweens.add({
-      targets: this.levelResultText,
-      alpha: 1,
-      duration: 220,
-      ease: 'Quad.Out'
-    });
-
     const nextLevelId = getNextCampaignLevelId(this.levelId);
-    const subText = nextLevelId
-      ? `Next: ${nextLevelId}`
-      : 'Campaign Clear';
-
-    this.add
-      .text(640, 456, subText, {
-        fontFamily: GAME_UI_FONT,
-        fontSize: '30px',
-        align: 'center',
-        color: '#ffd8ad'
-      })
-      .setOrigin(0.5)
-      .setDepth(391);
-
-    const transitionDelayMs = 1900;
-    const preTransitionFadeMs = 220;
-
-    this.time.delayedCall(Math.max(0, transitionDelayMs - preTransitionFadeMs), () => {
-      this.fadeOutVictoryMusicFast(preTransitionFadeMs / 1000, false);
+    this.levelResultOverlay = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.74).setDepth(380).setInteractive();
+    this.levelResultOverlay.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
     });
 
-    this.time.delayedCall(transitionDelayMs, () => {
-      this.stopVictoryMusicSource();
-      this.victoryMusicPlaybackState = 'idle';
-      if (nextLevelId) {
-        this.scene.start('GameScene', { levelId: nextLevelId });
+    const panelContainer = this.add.container(0, 0).setDepth(390).setAlpha(0);
+
+    const panelWidth = 646;
+    const panelHeight = nextLevelId ? 500 : 444;
+    const panelRadius = 28;
+    const panelX = 640;
+    const panelY = 360;
+    const panelTop = panelY - panelHeight * 0.5;
+    const panelLeft = panelX - panelWidth * 0.5;
+
+    const panelShadow = this.add.graphics();
+    panelShadow.fillStyle(0x1b0905, 0.52);
+    panelShadow.fillRoundedRect(panelLeft, panelTop + 10, panelWidth, panelHeight, panelRadius);
+
+    const panel = this.add.graphics();
+    panel.fillStyle(0x4a2012, 0.97);
+    panel.fillRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, panelRadius);
+    panel.lineStyle(2, 0xf0bd85, 1);
+    panel.strokeRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, panelRadius);
+
+    const topStrip = this.add.graphics();
+    topStrip.fillStyle(0xffffff, 0.14);
+    topStrip.fillRoundedRect(panelX - 272, panelTop + 36, 544, 40, 14);
+
+    const divider = this.add.rectangle(panelX, panelTop + 236, panelWidth - 120, 2, 0xf0bd85, 0.32);
+
+    const titleText = this.add
+      .text(panelX, panelTop + 72, 'SHIFT CLEAR', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '66px',
+        color: '#fff0d9',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(1.4)
+      .setShadow(0, 3, '#000000', 10);
+
+    this.levelResultText = this.add
+      .text(panelX, panelTop + 148, this.levelName, {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '34px',
+        color: '#ffd9b3',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(0.9);
+
+    const summaryText = this.add
+      .text(panelX, panelTop + 204, `BOX ${this.acceptedCount}/${this.levelQuota}   SCORE ${this.score}`, {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '28px',
+        color: '#ffe7cc',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(0.8);
+
+    panelContainer.add([panelShadow, panel, topStrip, divider, titleText, this.levelResultText, summaryText]);
+
+    let resultLocked = false;
+    const createResultButton = (label, y, accentColor, onSelect) => {
+      const entry = this.add.container(640, y);
+
+      const shadowMid = this.add.rectangle(0, 7, 360, 72, 0x1b0905, 0.44);
+      const shadowLeft = this.add.circle(-180, 7, 36, 0x1b0905, 0.44);
+      const shadowRight = this.add.circle(180, 7, 36, 0x1b0905, 0.44);
+
+      const bodyMid = this.add.rectangle(0, 0, 360, 72, 0x7a4327, 1);
+      const bodyLeft = this.add.circle(-180, 0, 36, 0x7a4327, 1);
+      const bodyRight = this.add.circle(180, 0, 36, 0x7a4327, 1);
+      const glossMid = this.add.rectangle(0, -15, 328, 20, 0xffffff, 0.14);
+      const glossLeft = this.add.circle(-164, -15, 10, 0xffffff, 0.14);
+      const glossRight = this.add.circle(164, -15, 10, 0xffffff, 0.14);
+      const accentDot = this.add.circle(-150, 0, 8, accentColor, 1);
+
+      const labelText = this.add
+        .text(0, 0, label, {
+          fontFamily: GAME_DISPLAY_FONT,
+          fontSize: '42px',
+          color: '#fff5ea',
+          align: 'center'
+        })
+        .setOrigin(0.5)
+        .setLetterSpacing(1.2)
+        .setShadow(0, 2, '#6b3418', 4);
+
+      const hitArea = this.add.zone(0, 0, 420, 88).setInteractive({ useHandCursor: true });
+
+      const setHighlighted = (highlighted) => {
+        const fill = highlighted ? 0x915131 : 0x7a4327;
+        bodyMid.setFillStyle(fill, 1);
+        bodyLeft.setFillStyle(fill, 1);
+        bodyRight.setFillStyle(fill, 1);
+        accentDot.setScale(highlighted ? 1.24 : 1);
+        labelText.setScale(highlighted ? 1.03 : 1);
+      };
+
+      hitArea.on('pointerover', () => {
+        if (resultLocked) {
+          return;
+        }
+        setHighlighted(true);
+      });
+
+      hitArea.on('pointerout', () => {
+        setHighlighted(false);
+      });
+
+      hitArea.on('pointerdown', (_pointer, _x, _y, event) => {
+        event?.stopPropagation();
+        if (resultLocked) {
+          return;
+        }
+
+        resultLocked = true;
+        this.tweens.killTweensOf(entry);
+        this.tweens.add({
+          targets: entry,
+          scaleX: 0.94,
+          scaleY: 0.94,
+          duration: 85,
+          yoyo: true,
+          ease: 'Quad.Out',
+          onComplete: () => {
+            onSelect();
+          }
+        });
+      });
+
+      entry.add([
+        shadowMid,
+        shadowLeft,
+        shadowRight,
+        bodyMid,
+        bodyLeft,
+        bodyRight,
+        glossMid,
+        glossLeft,
+        glossRight,
+        accentDot,
+        labelText,
+        hitArea
+      ]);
+
+      panelContainer.add(entry);
+      return entry;
+    };
+
+    const transitionToSelection = () => {
+      if (this.sceneTransitioning) {
         return;
       }
 
-      this.scene.start('LevelSelectScene', { selectedLevelId: this.levelId });
+      this.sceneTransitioning = true;
+      this.fadeOutVictoryMusicFast(0.22, false);
+      this.playSceneWipeTransition(() => {
+        this.stopVictoryMusicSource();
+        this.victoryMusicPlaybackState = 'idle';
+        this.scene.start('LevelSelectScene', { selectedLevelId: this.levelId });
+      });
+    };
+
+    const transitionToNextLevel = () => {
+      if (!nextLevelId || this.sceneTransitioning) {
+        return;
+      }
+
+      this.sceneTransitioning = true;
+      this.fadeOutVictoryMusicFast(0.22, false);
+      this.playSceneWipeTransition(() => {
+        this.stopVictoryMusicSource();
+        this.victoryMusicPlaybackState = 'idle';
+        this.startLoadingGameplay(nextLevelId, `Loading ${nextLevelId}`);
+      });
+    };
+
+    if (nextLevelId) {
+      createResultButton('Next Shift', panelTop + 306, 0x34d399, transitionToNextLevel);
+      createResultButton('Level Select', panelTop + 388, 0xf59e0b, transitionToSelection);
+    } else {
+      createResultButton('Level Select', panelTop + 344, 0x34d399, transitionToSelection);
+    }
+
+    panelContainer.setScale(0.975);
+    this.tweens.add({
+      targets: panelContainer,
+      alpha: 1,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 240,
+      ease: 'Back.Out'
     });
   }
 
@@ -4381,8 +4957,8 @@ export default class GameScene extends Phaser.Scene {
         width: MAIN_BELT_WIDTH,
         height: MAIN_BELT_HEIGHT,
         orientation: 'vertical',
-        spacing: 20,
-        margin: 8,
+        spacing: 24,
+        margin: 10,
         offset: 0
       };
       drawConveyorLines(this.mainBeltLines, this.mainBeltLineConfig);
@@ -4442,13 +5018,13 @@ export default class GameScene extends Phaser.Scene {
         width: laneWidth,
         height: SIDE_BELT_HEIGHT,
         orientation: 'horizontal',
-        spacing: 22,
-        margin: 7,
+        spacing: 26,
+        margin: 9,
         offset: 0
       };
       drawConveyorLines(beltLines, beltLineConfig);
 
-      const chestAura = this.add.circle(laneConfig.chestX, laneConfig.y, 54, laneColor, 0.12).setDepth(5).setAlpha(0.04);
+      const chestAura = this.add.circle(laneConfig.chestX, laneConfig.y, 62, laneColor, 0.12).setDepth(5).setAlpha(0.04);
       chestAura.setBlendMode(Phaser.BlendModes.ADD);
 
       let chestSprite = null;
@@ -4456,7 +5032,7 @@ export default class GameScene extends Phaser.Scene {
       if (hasChestSprites) {
         chestSprite = this.add.image(laneConfig.chestX, laneConfig.y, CHEST_CLOSED_KEY).setDepth(6);
         const chestMaxSize = Math.max(chestSprite.width, chestSprite.height);
-        chestBaseScale = chestMaxSize > 0 ? 88 / chestMaxSize : 1;
+        chestBaseScale = chestMaxSize > 0 ? 102 / chestMaxSize : 1;
         chestSprite.setScale(chestBaseScale);
       } else {
         this.add.rectangle(laneConfig.chestX, laneConfig.y, 114, 56, 0x704124, 1).setStrokeStyle(3, laneColor, 1);
@@ -5061,7 +5637,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   handleDragStart(_pointer, gameObject) {
-    if (this.isDraftActive) {
+    if (this.isPaused || this.isDraftActive) {
       return;
     }
 
@@ -5121,6 +5697,10 @@ export default class GameScene extends Phaser.Scene {
   }
 
   handleDrag(_pointer, gameObject, dragX, dragY) {
+    if (this.isPaused) {
+      return;
+    }
+
     if (!this.dragContext || this.dragContext.itemId !== gameObject.getData('itemId')) {
       return;
     }
@@ -5137,6 +5717,10 @@ export default class GameScene extends Phaser.Scene {
   }
 
   handleDragEnd(pointer, gameObject) {
+    if (this.isPaused) {
+      return;
+    }
+
     if (!this.dragContext || this.dragContext.itemId !== gameObject.getData('itemId')) {
       return;
     }
@@ -5575,11 +6159,11 @@ export default class GameScene extends Phaser.Scene {
     const speedFactorRaw = this.baseMainSpeed > 0 ? this.mainSpeed / this.baseMainSpeed : 1;
     const speedFactor = Phaser.Math.Clamp(speedFactorRaw, 0.75, 3.25);
 
-    const pickDuration = Phaser.Math.Clamp(70 / speedFactor, 28, 70);
-    const rotateDuration = Phaser.Math.Clamp(210 / speedFactor, 80, 210);
-    const dropDuration = Phaser.Math.Clamp(80 / speedFactor, 28, 80);
-    const returnDuration = Phaser.Math.Clamp(180 / speedFactor, 70, 180);
-    const anticipationDuration = Phaser.Math.Clamp(64 / speedFactor, 24, 64);
+    const pickDuration = Phaser.Math.Clamp((70 * CLAW_TIMING_SCALE) / speedFactor, 34, 96);
+    const rotateDuration = Phaser.Math.Clamp((210 * CLAW_TIMING_SCALE) / speedFactor, 96, 260);
+    const dropDuration = Phaser.Math.Clamp((80 * CLAW_TIMING_SCALE) / speedFactor, 34, 98);
+    const returnDuration = Phaser.Math.Clamp((180 * CLAW_TIMING_SCALE) / speedFactor, 86, 230);
+    const anticipationDuration = Phaser.Math.Clamp((64 * CLAW_TIMING_SCALE) / speedFactor, 30, 82);
     const anticipationAngle = baseAngle - lane.direction * 12;
 
     const holdLength = armLength + CLAW_JAW_LENGTH * 0.75;
@@ -5729,10 +6313,10 @@ export default class GameScene extends Phaser.Scene {
 
     const speedFactorRaw = this.baseSideSpeed > 0 ? this.sideSpeed / this.baseSideSpeed : 1;
     const speedFactor = Phaser.Math.Clamp(speedFactorRaw, 0.75, 3.25);
-    const pickDuration = Phaser.Math.Clamp(70 / speedFactor, 28, 70);
-    const rotateDuration = Phaser.Math.Clamp(210 / speedFactor, 80, 210);
-    const returnDuration = Phaser.Math.Clamp(180 / speedFactor, 70, 180);
-    const anticipationDuration = Phaser.Math.Clamp(58 / speedFactor, 22, 58);
+    const pickDuration = Phaser.Math.Clamp((70 * CLAW_TIMING_SCALE) / speedFactor, 34, 96);
+    const rotateDuration = Phaser.Math.Clamp((210 * CLAW_TIMING_SCALE) / speedFactor, 96, 260);
+    const returnDuration = Phaser.Math.Clamp((180 * CLAW_TIMING_SCALE) / speedFactor, 86, 230);
+    const anticipationDuration = Phaser.Math.Clamp((58 * CLAW_TIMING_SCALE) / speedFactor, 26, 74);
     const anticipationAngle = baseAngle - lane.direction * 11;
 
     const holdLength = armLength + CLAW_JAW_LENGTH * 0.75;

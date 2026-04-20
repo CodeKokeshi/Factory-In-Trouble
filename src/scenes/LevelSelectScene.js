@@ -42,6 +42,7 @@ export default class LevelSelectScene extends Phaser.Scene {
     this.completedCampaignLevelIds = new Set();
     this.selectedIndex = 0;
     this.gridColumns = 3;
+    this.isTransitioning = false;
   }
 
   preload() {
@@ -57,6 +58,7 @@ export default class LevelSelectScene extends Phaser.Scene {
   }
 
   create(data) {
+    this.isTransitioning = false;
     this.levelEntries = getCampaignLevels();
     this.levelTiles = [];
     this.completedCampaignLevelIds = getCompletedCampaignLevelIds();
@@ -618,6 +620,10 @@ export default class LevelSelectScene extends Phaser.Scene {
   }
 
   launchSelectedLevel() {
+    if (this.isTransitioning) {
+      return;
+    }
+
     const selected = this.levelEntries[this.selectedIndex];
     if (!selected) {
       return;
@@ -633,6 +639,12 @@ export default class LevelSelectScene extends Phaser.Scene {
       mainMenuScene.stopMusicForGameplay(0.14);
     }
 
-    this.scene.start('GameScene', { levelId: selected.id });
+    this.isTransitioning = true;
+    this.scene.start('LoadingScene', {
+      targetSceneKey: 'GameScene',
+      targetData: { levelId: selected.id },
+      loadingLabel: `Loading ${selected.id}`,
+      readyLabel: 'Shift Ready'
+    });
   }
 }
