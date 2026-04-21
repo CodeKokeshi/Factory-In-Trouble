@@ -52,6 +52,7 @@ const DRONE_TUTORIAL_LOOP_DROP_FLY_MS = 620;
 const DRONE_TUTORIAL_LOOP_HOLD_MS = 880;
 const DRONE_TUTORIAL_BUTTON_LOCK_MS = 1000;
 const DRONE_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_drone_tutorial_disabled_v1';
+const TUTORIAL_RESET_HOTKEY_CODE = 221; // ]
 
 const LANE_SWAP_MIN_COOLDOWN_MS = 21000;
 const LANE_SWAP_MAX_COOLDOWN_MS = 33000;
@@ -110,6 +111,14 @@ const CHEST_PICKUP_BUFFER = 22;
 const STANDARD_CHEST_OFFSET_X = 80;
 const CHEST_BUBBLE_SWAP_INTERVAL_MS = 900;
 const CHEST_BUBBLE_ICON_SIZE = 32;
+const CHEST_LABEL_Y_OFFSET = 74;
+const CHEST_LABEL_REVEAL_DURATION_MS = 190;
+const CHEST_LABEL_BREATH_DISTANCE = 2.5;
+const CHEST_LABEL_BREATH_SCALE = 0.035;
+const CHEST_LABEL_BREATH_DURATION_MS = 1480;
+const CHEST_LABEL_COLOR = '#fff2df';
+const CHEST_LABEL_JAM_COLOR = '#ffc4d0';
+const CHEST_LABEL_STROKE = '#4a2012';
 const LEVEL_INTRO_START_DELAY_MS = 380;
 const LEVEL_INTRO_DIM_ALPHA = 0.66;
 const LEVEL_INTRO_DIM_TWEEN_MS = 170;
@@ -391,6 +400,7 @@ export default class GameScene extends Phaser.Scene {
     this.droneTutorialButtonUnlockEvent = null;
     this.droneTutorialPreferenceLoaded = false;
     this.droneTutorialDoNotShowAgain = false;
+    this.tutorialResetHotkeyCode = TUTORIAL_RESET_HOTKEY_CODE;
 
     this.laneSwapActive = false;
     this.laneSwapTimerMs = Number.POSITIVE_INFINITY;
@@ -1211,6 +1221,7 @@ export default class GameScene extends Phaser.Scene {
     this.createParticles();
     this.ensureJamBeetleAnimation();
     this.setupGrabControls();
+    this.input.keyboard?.on('keydown', this.handleGameplayKeyDown, this);
     this.game.events.emit('scene-ready:GameScene', {
       loadingToken: this.loadingToken,
       levelId: this.levelId
@@ -1459,7 +1470,27 @@ export default class GameScene extends Phaser.Scene {
 
     this.input.off('pointerdown', this.unlockAudioContext, this);
     this.input.keyboard?.off('keydown', this.unlockAudioContext, this);
+    this.input.keyboard?.off('keydown', this.handleGameplayKeyDown, this);
     this.input.gamepad?.off('down', this.unlockAudioContext, this);
+  }
+
+  handleGameplayKeyDown(event) {
+    const keyCode = Number(event?.keyCode ?? event?.which ?? -1);
+    if (keyCode !== this.tutorialResetHotkeyCode || event?.repeat) {
+      return;
+    }
+
+    this.resetTutorialSuppressionFlags();
+  }
+
+  resetTutorialSuppressionFlags() {
+    this.setDroneIncidentTutorialDisabled(false);
+    this.droneTutorialShownThisRun = false;
+    this.droneTutorialPreferenceLoaded = true;
+    this.droneTutorialDoNotShowAgain = false;
+
+    this.emitFloatingText(640, 116, 'TUTORIALS RESET', '#bbf7d0', 24);
+    this.playSfx('transfer', 0.9);
   }
 
   loadBgmBuffer() {
@@ -5660,6 +5691,22 @@ export default class GameScene extends Phaser.Scene {
         chestBubbleIcon.setVisible(false).setAlpha(0);
       }
 
+      const chestLabelText = this.add
+        .text(laneConfig.chestX, laneConfig.y - CHEST_LABEL_Y_OFFSET, this.getLaneChestLabelText(laneConfig), {
+          fontFamily: GAME_DISPLAY_FONT,
+          fontSize: '28px',
+          color: CHEST_LABEL_COLOR,
+          stroke: CHEST_LABEL_STROKE,
+          strokeThickness: 6,
+          align: 'center'
+        })
+        .setDepth(12)
+        .setOrigin(0.5)
+        .setLetterSpacing(1.1)
+        .setShadow(0, 2, '#000000', 9)
+        .setVisible(false)
+        .setAlpha(0);
+
       const clawBaseAngle = laneConfig.direction > 0 ? 0 : 180;
       let clawContainer = null;
       if (this.showTransferClaws) {
@@ -5702,6 +5749,10 @@ export default class GameScene extends Phaser.Scene {
         chestBubbleSwapMs: 0,
         chestBubbleSwapIntervalMs: CHEST_BUBBLE_SWAP_INTERVAL_MS,
         chestBubbleRevealLocked: true,
+        chestLabelText,
+        chestLabelBaseY: laneConfig.y - CHEST_LABEL_Y_OFFSET,
+        chestLabelRevealLocked: true,
+        chestLabelIdleTween: null,
         clawHeatMax: 0,
         clawHeatCurrent: 0,
         clawOverheated: false,
@@ -5734,6 +5785,194 @@ export default class GameScene extends Phaser.Scene {
     if (iconDim > 0) {
       icon.setScale(targetSize / iconDim);
     }
+  }
+
+  getLaneChestLabelText(laneLike) {
+    const desiredType = laneLike?.desiredType;
+    if (desiredType === 'condiments') {
+      return 'Sauce';
+    }
+
+    if (laneLike?.label) {
+      return laneLike.label;
+    }
+
+    return this.foodTypeById[desiredType]?.label || '';
+  }
+
+  refreshLaneChestLabelText(lane) {
+    if (!lane?.chestLabelText?.active) {
+      return;
+    }
+
+    const nextLabel = this.getLaneChestLabelText(lane) || 'Lane';
+    lane.chestLabelText.setText(nextLabel);
+  }
+
+  setLaneChestLabelVisible(lane, visible) {
+    const alpha = visible ? 1 : 0;
+    const label = lane?.chestLabelText;
+    if (!label?.active) {
+      return;
+    }
+
+    label.setVisible(visible);
+    label.setAlpha(alpha);
+
+    if (!visible) {
+      this.tweens.killTweensOf(label);
+      label.setScale(1);
+      label.setX(lane.chestX);
+      label.setY(lane.chestLabelBaseY);
+      label.setColor(CHEST_LABEL_COLOR);
+      if (lane.chestLabelIdleTween) {
+        lane.chestLabelIdleTween.remove();
+        lane.chestLabelIdleTween = null;
+      }
+    }
+  }
+
+  startLaneChestLabelIdleTween(lane) {
+    const label = lane?.chestLabelText;
+    if (!label?.active || !label.visible) {
+      return;
+    }
+
+    if (lane.chestLabelIdleTween) {
+      lane.chestLabelIdleTween.remove();
+      lane.chestLabelIdleTween = null;
+    }
+
+    label.setX(lane.chestX);
+    label.setY(lane.chestLabelBaseY);
+    label.setScale(1);
+
+    lane.chestLabelIdleTween = this.tweens.add({
+      targets: label,
+      y: lane.chestLabelBaseY - CHEST_LABEL_BREATH_DISTANCE,
+      scaleX: 1 + CHEST_LABEL_BREATH_SCALE,
+      scaleY: 1 + CHEST_LABEL_BREATH_SCALE,
+      duration: CHEST_LABEL_BREATH_DURATION_MS + Math.random() * 260,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+  }
+
+  revealLaneChestLabel(lane, { immediate = false } = {}) {
+    const label = lane?.chestLabelText;
+    if (!label?.active) {
+      return;
+    }
+
+    this.refreshLaneChestLabelText(lane);
+
+    lane.chestLabelRevealLocked = false;
+    if (lane.chestLabelIdleTween) {
+      lane.chestLabelIdleTween.remove();
+      lane.chestLabelIdleTween = null;
+    }
+
+    this.tweens.killTweensOf(label);
+    label.setVisible(true);
+    label.setColor(CHEST_LABEL_COLOR);
+    label.setX(lane.chestX);
+
+    if (immediate) {
+      label.setAlpha(1);
+      label.setY(lane.chestLabelBaseY);
+      label.setScale(1);
+      this.startLaneChestLabelIdleTween(lane);
+      return;
+    }
+
+    label.setAlpha(0);
+    label.setY(lane.chestLabelBaseY + 8);
+    label.setScale(0.72);
+
+    this.tweens.add({
+      targets: label,
+      alpha: 1,
+      y: lane.chestLabelBaseY,
+      scaleX: 1,
+      scaleY: 1,
+      duration: CHEST_LABEL_REVEAL_DURATION_MS,
+      ease: 'Back.Out',
+      onComplete: () => {
+        if (!label.active) {
+          return;
+        }
+
+        this.startLaneChestLabelIdleTween(lane);
+      }
+    });
+  }
+
+  playLaneChestLabelEvent(lane, eventId = 'consume') {
+    const label = lane?.chestLabelText;
+    if (!label?.active || lane?.chestLabelRevealLocked) {
+      return;
+    }
+
+    this.tweens.killTweensOf(label);
+    if (lane.chestLabelIdleTween) {
+      lane.chestLabelIdleTween.remove();
+      lane.chestLabelIdleTween = null;
+    }
+
+    label.setVisible(true);
+    label.setAlpha(1);
+    label.setX(lane.chestX);
+    label.setY(lane.chestLabelBaseY);
+    label.setScale(1);
+
+    if (eventId === 'jam') {
+      label.setColor(CHEST_LABEL_JAM_COLOR);
+      this.tweens.add({
+        targets: label,
+        x: { from: lane.chestX - 4, to: lane.chestX + 4 },
+        scaleX: 1.12,
+        scaleY: 1.12,
+        duration: 54,
+        yoyo: true,
+        repeat: 2,
+        ease: 'Sine.InOut',
+        onComplete: () => {
+          if (!label.active) {
+            return;
+          }
+
+          label.setColor(CHEST_LABEL_COLOR);
+          label.setX(lane.chestX);
+          label.setY(lane.chestLabelBaseY);
+          label.setScale(1);
+          this.startLaneChestLabelIdleTween(lane);
+        }
+      });
+      return;
+    }
+
+    label.setColor('#fff9ee');
+    this.tweens.add({
+      targets: label,
+      y: lane.chestLabelBaseY - 4,
+      scaleX: 1.13,
+      scaleY: 1.13,
+      duration: 84,
+      yoyo: true,
+      ease: 'Sine.Out',
+      onComplete: () => {
+        if (!label.active) {
+          return;
+        }
+
+        label.setColor(CHEST_LABEL_COLOR);
+        label.setX(lane.chestX);
+        label.setY(lane.chestLabelBaseY);
+        label.setScale(1);
+        this.startLaneChestLabelIdleTween(lane);
+      }
+    });
   }
 
   setLaneChestBubbleVisible(lane, visible) {
@@ -5881,7 +6120,10 @@ export default class GameScene extends Phaser.Scene {
 
       lane.chestBubbleRevealLocked = true;
       lane.chestBubbleSwapMs = 0;
+      lane.chestLabelRevealLocked = true;
       this.setLaneChestBubbleVisible(lane, false);
+      this.setLaneChestLabelVisible(lane, false);
+      this.refreshLaneChestLabelText(lane);
 
       const textureKeys = Array.isArray(lane.chestBubbleTextureKeys)
         ? lane.chestBubbleTextureKeys.filter((textureKey) => this.textures.exists(textureKey))
@@ -5891,7 +6133,9 @@ export default class GameScene extends Phaser.Scene {
         laneIds.push(lane.id);
       } else {
         lane.chestBubbleRevealLocked = false;
+        lane.chestLabelRevealLocked = false;
         this.setLaneChestBubbleVisible(lane, true);
+        this.revealLaneChestLabel(lane, { immediate: true });
       }
     });
 
@@ -5926,7 +6170,9 @@ export default class GameScene extends Phaser.Scene {
       : [];
     if (textureKeys.length === 0) {
       lane.chestBubbleRevealLocked = false;
+      lane.chestLabelRevealLocked = false;
       this.setLaneChestBubbleVisible(lane, true);
+      this.revealLaneChestLabel(lane, { immediate: true });
       this.playLevelChestIntroStep(sequenceToken, laneIds, laneIndex + 1);
       return;
     }
@@ -6023,6 +6269,7 @@ export default class GameScene extends Phaser.Scene {
 
           lane.chestBubbleTextureIndex = shuffleIndex;
           this.revealLaneChestBubble(lane, activeTextureKey);
+          this.revealLaneChestLabel(lane);
 
           this.tweens.add({
             targets: this.levelIntroDimOverlay,
@@ -6054,7 +6301,16 @@ export default class GameScene extends Phaser.Scene {
     this.teardownLevelChestIntroState({ destroyDim: true });
 
     for (const lane of Object.values(this.lanesById)) {
-      if (!lane?.chestBubbleIcon?.active) {
+      if (!lane) {
+        continue;
+      }
+
+      lane.chestLabelRevealLocked = false;
+      if (lane.chestLabelText?.active && !lane.chestLabelText.visible) {
+        this.revealLaneChestLabel(lane, { immediate: true });
+      }
+
+      if (!lane.chestBubbleIcon?.active) {
         continue;
       }
 
@@ -8311,7 +8567,7 @@ export default class GameScene extends Phaser.Scene {
 
     lane.desiredType = foodType.id;
     lane.label = foodType.label;
-    lane.chestLabel = `${foodType.label} Chest`;
+    lane.chestLabel = `${this.getLaneChestLabelText({ desiredType: foodType.id, label: foodType.label })} Chest`;
     lane.chestBubbleTextureKeys = (
       this.chestBubbleTextureKeysByFoodId[foodType.id]
       || this.textureKeysByFoodId[foodType.id]
@@ -8325,6 +8581,7 @@ export default class GameScene extends Phaser.Scene {
 
     const bubbleTexture = lane.chestBubbleTextureKeys[lane.chestBubbleTextureIndex] || lane.chestBubbleTextureKeys[0] || null;
     this.revealLaneChestBubble(lane, bubbleTexture);
+    this.refreshLaneChestLabelText(lane);
 
     if (lane.chestAura?.active) {
       lane.chestAura.setFillStyle(foodType.color, 0.12);
@@ -10185,6 +10442,7 @@ export default class GameScene extends Phaser.Scene {
               this.applyItemStateTint(item, 0x64748b);
               this.emitJamParticles(item);
               this.pulseLaneVisual(lane.id, 1.05, true);
+              this.playLaneChestLabelEvent(lane, 'jam');
               this.playImpactFx(0.82, 0xef4444);
               this.emitFloatingText(item.x, item.y - 24, 'JAM!', '#fb7185', 20);
               this.emitShockRing(item.x, item.y, 0xef4444, 2.8, 280);
@@ -10247,6 +10505,7 @@ export default class GameScene extends Phaser.Scene {
 
   playChestReceiveAnimation(lane) {
     this.pulseLaneVisual(lane.id, 0.82);
+    this.playLaneChestLabelEvent(lane, 'consume');
 
     if (!lane.chestSprite || !this.textures.exists(CHEST_CLOSED_KEY) || !this.textures.exists(CHEST_OPENED_KEY)) {
       return;

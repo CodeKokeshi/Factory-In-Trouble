@@ -52,13 +52,7 @@ const DRONE_TUTORIAL_LOOP_DROP_FLY_MS = 620;
 const DRONE_TUTORIAL_LOOP_HOLD_MS = 880;
 const DRONE_TUTORIAL_BUTTON_LOCK_MS = 1000;
 const DRONE_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_drone_tutorial_disabled_v1';
-
-const BEETLE_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_beetle_tutorial_disabled_v1';
-const BEETLE_TUTORIAL_BUTTON_LOCK_MS = 1000;
-const BEETLE_TUTORIAL_FLOW_SPAWN_INTERVAL_MS = 2200;
-const BEETLE_TUTORIAL_FLOW_TRAVEL_MS = 18000;
-const BEETLE_TUTORIAL_BELT_WIDTH = 620;
-const BEETLE_TUTORIAL_MAX_ACTIVE_BEETLES = 4;
+const TUTORIAL_RESET_HOTKEY_CODE = 221; // ]
 
 const LANE_SWAP_MIN_COOLDOWN_MS = 21000;
 const LANE_SWAP_MAX_COOLDOWN_MS = 33000;
@@ -117,6 +111,14 @@ const CHEST_PICKUP_BUFFER = 22;
 const STANDARD_CHEST_OFFSET_X = 80;
 const CHEST_BUBBLE_SWAP_INTERVAL_MS = 900;
 const CHEST_BUBBLE_ICON_SIZE = 32;
+const CHEST_LABEL_Y_OFFSET = 74;
+const CHEST_LABEL_REVEAL_DURATION_MS = 190;
+const CHEST_LABEL_BREATH_DISTANCE = 2.5;
+const CHEST_LABEL_BREATH_SCALE = 0.035;
+const CHEST_LABEL_BREATH_DURATION_MS = 1480;
+const CHEST_LABEL_COLOR = '#fff2df';
+const CHEST_LABEL_JAM_COLOR = '#ffc4d0';
+const CHEST_LABEL_STROKE = '#4a2012';
 const LEVEL_INTRO_START_DELAY_MS = 380;
 const LEVEL_INTRO_DIM_ALPHA = 0.66;
 const LEVEL_INTRO_DIM_TWEEN_MS = 170;
@@ -398,18 +400,7 @@ export default class GameScene extends Phaser.Scene {
     this.droneTutorialButtonUnlockEvent = null;
     this.droneTutorialPreferenceLoaded = false;
     this.droneTutorialDoNotShowAgain = false;
-
-    this.beetleTutorialShownThisRun = false;
-    this.beetleTutorialActive = false;
-    this.beetleTutorialOverlay = null;
-    this.beetleTutorialPreviewState = null;
-    this.beetleTutorialFlowEvent = null;
-    this.beetleTutorialButtonUnlockEvent = null;
-    this.beetleTutorialPreferenceLoaded = false;
-    this.beetleTutorialDoNotShowAgain = false;
-    this.beetleTutorialGoalSplatDone = false;
-    this.beetleTutorialGoalFlickDone = false;
-    this.beetleTutorialButtonDelayReady = false;
+    this.tutorialResetHotkeyCode = TUTORIAL_RESET_HOTKEY_CODE;
 
     this.laneSwapActive = false;
     this.laneSwapTimerMs = Number.POSITIVE_INFINITY;
@@ -1026,7 +1017,6 @@ export default class GameScene extends Phaser.Scene {
   resetRunState() {
     this.cleanupDroneSabotage(true);
     this.cleanupDroneIncidentTutorial({ resumeGameplay: false });
-    this.cleanupBeetleIncidentTutorial({ resumeGameplay: false });
     this.cleanupLaneSwapIncident({ preserveTimer: true });
     this.cleanupClawBreakWarning();
 
@@ -1091,16 +1081,6 @@ export default class GameScene extends Phaser.Scene {
     this.droneTutorialLoopTweens = [];
     this.droneTutorialLoopToken = 0;
     this.droneTutorialButtonUnlockEvent = null;
-
-    this.beetleTutorialShownThisRun = false;
-    this.beetleTutorialActive = false;
-    this.beetleTutorialOverlay = null;
-    this.beetleTutorialPreviewState = null;
-    this.beetleTutorialFlowEvent = null;
-    this.beetleTutorialButtonUnlockEvent = null;
-    this.beetleTutorialGoalSplatDone = false;
-    this.beetleTutorialGoalFlickDone = false;
-    this.beetleTutorialButtonDelayReady = false;
 
     this.dragContext = null;
     this.simTimeScale = 1;
@@ -1241,6 +1221,7 @@ export default class GameScene extends Phaser.Scene {
     this.createParticles();
     this.ensureJamBeetleAnimation();
     this.setupGrabControls();
+    this.input.keyboard?.on('keydown', this.handleGameplayKeyDown, this);
     this.game.events.emit('scene-ready:GameScene', {
       loadingToken: this.loadingToken,
       levelId: this.levelId
@@ -1453,7 +1434,6 @@ export default class GameScene extends Phaser.Scene {
     this.cleanupLaneSwapIncident({ preserveTimer: true });
     this.cleanupClawBreakWarning();
     this.cleanupDroneIncidentTutorial({ resumeGameplay: false });
-    this.cleanupBeetleIncidentTutorial({ resumeGameplay: false });
 
     this.isPaused = false;
     this.sceneTransitioning = false;
@@ -1490,7 +1470,27 @@ export default class GameScene extends Phaser.Scene {
 
     this.input.off('pointerdown', this.unlockAudioContext, this);
     this.input.keyboard?.off('keydown', this.unlockAudioContext, this);
+    this.input.keyboard?.off('keydown', this.handleGameplayKeyDown, this);
     this.input.gamepad?.off('down', this.unlockAudioContext, this);
+  }
+
+  handleGameplayKeyDown(event) {
+    const keyCode = Number(event?.keyCode ?? event?.which ?? -1);
+    if (keyCode !== this.tutorialResetHotkeyCode || event?.repeat) {
+      return;
+    }
+
+    this.resetTutorialSuppressionFlags();
+  }
+
+  resetTutorialSuppressionFlags() {
+    this.setDroneIncidentTutorialDisabled(false);
+    this.droneTutorialShownThisRun = false;
+    this.droneTutorialPreferenceLoaded = true;
+    this.droneTutorialDoNotShowAgain = false;
+
+    this.emitFloatingText(640, 116, 'TUTORIALS RESET', '#bbf7d0', 24);
+    this.playSfx('transfer', 0.9);
   }
 
   loadBgmBuffer() {
@@ -4721,27 +4721,11 @@ export default class GameScene extends Phaser.Scene {
   createPauseMenuEntry(container, label, y, accentColor, onSelect, entryStyle = {}) {
     const bodyColor = Number.isFinite(entryStyle.bodyColor) ? entryStyle.bodyColor : 0x7a4327;
     const bodyHoverColor = Number.isFinite(entryStyle.bodyHoverColor) ? entryStyle.bodyHoverColor : 0x915131;
-    const disabledBodyColor = Number.isFinite(entryStyle.disabledBodyColor) ? entryStyle.disabledBodyColor : 0x6b7280;
-    const disabledBodyHoverColor = Number.isFinite(entryStyle.disabledBodyHoverColor)
-      ? entryStyle.disabledBodyHoverColor
-      : disabledBodyColor;
     const glossAlpha = Number.isFinite(entryStyle.glossAlpha)
       ? Phaser.Math.Clamp(entryStyle.glossAlpha, 0, 1)
       : 0.14;
-    const disabledGlossAlpha = Number.isFinite(entryStyle.disabledGlossAlpha)
-      ? Phaser.Math.Clamp(entryStyle.disabledGlossAlpha, 0, 1)
-      : Math.min(glossAlpha, 0.08);
     const textColor = typeof entryStyle.textColor === 'string' ? entryStyle.textColor : '#fff4e8';
-    const disabledTextColor = typeof entryStyle.disabledTextColor === 'string'
-      ? entryStyle.disabledTextColor
-      : '#d1d5db';
     const textShadowColor = typeof entryStyle.textShadowColor === 'string' ? entryStyle.textShadowColor : '#6b3418';
-    const disabledTextShadowColor = typeof entryStyle.disabledTextShadowColor === 'string'
-      ? entryStyle.disabledTextShadowColor
-      : '#374151';
-    const disabledAccentColor = Number.isFinite(entryStyle.disabledAccentColor)
-      ? entryStyle.disabledAccentColor
-      : 0x9ca3af;
 
     const entry = this.add.container(640, y);
 
@@ -4770,52 +4754,32 @@ export default class GameScene extends Phaser.Scene {
 
     const hitArea = this.add.zone(0, 0, 390, 84).setInteractive({ useHandCursor: true });
 
-    let highlighted = false;
-    let enabled = entryStyle.enabled !== false;
-
-    const applyVisualState = () => {
-      const fill = enabled
-        ? (highlighted ? bodyHoverColor : bodyColor)
-        : (highlighted ? disabledBodyHoverColor : disabledBodyColor);
+    const setHighlighted = (highlighted) => {
+      const fill = highlighted ? bodyHoverColor : bodyColor;
       bodyMid.setFillStyle(fill, 1);
       bodyLeft.setFillStyle(fill, 1);
       bodyRight.setFillStyle(fill, 1);
-      accentDot.setFillStyle(enabled ? accentColor : disabledAccentColor, 1);
-      accentDot.setScale(enabled && highlighted ? 1.24 : 1);
-      text.setScale(enabled && highlighted ? 1.03 : 1);
-      text.setColor(enabled ? textColor : disabledTextColor);
-      text.setShadow(0, 2, enabled ? textShadowColor : disabledTextShadowColor, 4);
-      glossMid.setAlpha(enabled ? glossAlpha : disabledGlossAlpha);
-      glossLeft.setAlpha(enabled ? glossAlpha : disabledGlossAlpha);
-      glossRight.setAlpha(enabled ? glossAlpha : disabledGlossAlpha);
-
-      if (hitArea.input) {
-        hitArea.input.cursor = enabled ? 'pointer' : 'default';
-      }
+      accentDot.setScale(highlighted ? 1.24 : 1);
+      text.setScale(highlighted ? 1.03 : 1);
     };
 
     hitArea.on('pointerover', () => {
-      if (!enabled || this.pauseTransitionLock) {
+      if (this.pauseTransitionLock) {
         return;
       }
-
-      highlighted = true;
-      applyVisualState();
+      setHighlighted(true);
     });
 
     hitArea.on('pointerout', () => {
-      highlighted = false;
-      applyVisualState();
+      setHighlighted(false);
     });
 
     hitArea.on('pointerdown', (_pointer, _x, _y, event) => {
       event?.stopPropagation();
-      if (!enabled || this.pauseTransitionLock) {
+      if (this.pauseTransitionLock) {
         return;
       }
 
-      highlighted = false;
-      applyVisualState();
       this.pauseTransitionLock = true;
       this.tweens.killTweensOf(entry);
       this.tweens.add({
@@ -4857,17 +4821,7 @@ export default class GameScene extends Phaser.Scene {
       ease: 'Quad.Out'
     });
 
-    applyVisualState();
-
-    return {
-      entry,
-      setEnabled: (nextEnabled) => {
-        enabled = nextEnabled === true;
-        highlighted = false;
-        applyVisualState();
-      },
-      isEnabled: () => enabled
-    };
+    return entry;
   }
 
   closePauseMenu(animate = true, onComplete = null) {
@@ -5737,6 +5691,22 @@ export default class GameScene extends Phaser.Scene {
         chestBubbleIcon.setVisible(false).setAlpha(0);
       }
 
+      const chestLabelText = this.add
+        .text(laneConfig.chestX, laneConfig.y - CHEST_LABEL_Y_OFFSET, this.getLaneChestLabelText(laneConfig), {
+          fontFamily: GAME_DISPLAY_FONT,
+          fontSize: '28px',
+          color: CHEST_LABEL_COLOR,
+          stroke: CHEST_LABEL_STROKE,
+          strokeThickness: 6,
+          align: 'center'
+        })
+        .setDepth(12)
+        .setOrigin(0.5)
+        .setLetterSpacing(1.1)
+        .setShadow(0, 2, '#000000', 9)
+        .setVisible(false)
+        .setAlpha(0);
+
       const clawBaseAngle = laneConfig.direction > 0 ? 0 : 180;
       let clawContainer = null;
       if (this.showTransferClaws) {
@@ -5779,6 +5749,10 @@ export default class GameScene extends Phaser.Scene {
         chestBubbleSwapMs: 0,
         chestBubbleSwapIntervalMs: CHEST_BUBBLE_SWAP_INTERVAL_MS,
         chestBubbleRevealLocked: true,
+        chestLabelText,
+        chestLabelBaseY: laneConfig.y - CHEST_LABEL_Y_OFFSET,
+        chestLabelRevealLocked: true,
+        chestLabelIdleTween: null,
         clawHeatMax: 0,
         clawHeatCurrent: 0,
         clawOverheated: false,
@@ -5811,6 +5785,194 @@ export default class GameScene extends Phaser.Scene {
     if (iconDim > 0) {
       icon.setScale(targetSize / iconDim);
     }
+  }
+
+  getLaneChestLabelText(laneLike) {
+    const desiredType = laneLike?.desiredType;
+    if (desiredType === 'condiments') {
+      return 'Sauce';
+    }
+
+    if (laneLike?.label) {
+      return laneLike.label;
+    }
+
+    return this.foodTypeById[desiredType]?.label || '';
+  }
+
+  refreshLaneChestLabelText(lane) {
+    if (!lane?.chestLabelText?.active) {
+      return;
+    }
+
+    const nextLabel = this.getLaneChestLabelText(lane) || 'Lane';
+    lane.chestLabelText.setText(nextLabel);
+  }
+
+  setLaneChestLabelVisible(lane, visible) {
+    const alpha = visible ? 1 : 0;
+    const label = lane?.chestLabelText;
+    if (!label?.active) {
+      return;
+    }
+
+    label.setVisible(visible);
+    label.setAlpha(alpha);
+
+    if (!visible) {
+      this.tweens.killTweensOf(label);
+      label.setScale(1);
+      label.setX(lane.chestX);
+      label.setY(lane.chestLabelBaseY);
+      label.setColor(CHEST_LABEL_COLOR);
+      if (lane.chestLabelIdleTween) {
+        lane.chestLabelIdleTween.remove();
+        lane.chestLabelIdleTween = null;
+      }
+    }
+  }
+
+  startLaneChestLabelIdleTween(lane) {
+    const label = lane?.chestLabelText;
+    if (!label?.active || !label.visible) {
+      return;
+    }
+
+    if (lane.chestLabelIdleTween) {
+      lane.chestLabelIdleTween.remove();
+      lane.chestLabelIdleTween = null;
+    }
+
+    label.setX(lane.chestX);
+    label.setY(lane.chestLabelBaseY);
+    label.setScale(1);
+
+    lane.chestLabelIdleTween = this.tweens.add({
+      targets: label,
+      y: lane.chestLabelBaseY - CHEST_LABEL_BREATH_DISTANCE,
+      scaleX: 1 + CHEST_LABEL_BREATH_SCALE,
+      scaleY: 1 + CHEST_LABEL_BREATH_SCALE,
+      duration: CHEST_LABEL_BREATH_DURATION_MS + Math.random() * 260,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+  }
+
+  revealLaneChestLabel(lane, { immediate = false } = {}) {
+    const label = lane?.chestLabelText;
+    if (!label?.active) {
+      return;
+    }
+
+    this.refreshLaneChestLabelText(lane);
+
+    lane.chestLabelRevealLocked = false;
+    if (lane.chestLabelIdleTween) {
+      lane.chestLabelIdleTween.remove();
+      lane.chestLabelIdleTween = null;
+    }
+
+    this.tweens.killTweensOf(label);
+    label.setVisible(true);
+    label.setColor(CHEST_LABEL_COLOR);
+    label.setX(lane.chestX);
+
+    if (immediate) {
+      label.setAlpha(1);
+      label.setY(lane.chestLabelBaseY);
+      label.setScale(1);
+      this.startLaneChestLabelIdleTween(lane);
+      return;
+    }
+
+    label.setAlpha(0);
+    label.setY(lane.chestLabelBaseY + 8);
+    label.setScale(0.72);
+
+    this.tweens.add({
+      targets: label,
+      alpha: 1,
+      y: lane.chestLabelBaseY,
+      scaleX: 1,
+      scaleY: 1,
+      duration: CHEST_LABEL_REVEAL_DURATION_MS,
+      ease: 'Back.Out',
+      onComplete: () => {
+        if (!label.active) {
+          return;
+        }
+
+        this.startLaneChestLabelIdleTween(lane);
+      }
+    });
+  }
+
+  playLaneChestLabelEvent(lane, eventId = 'consume') {
+    const label = lane?.chestLabelText;
+    if (!label?.active || lane?.chestLabelRevealLocked) {
+      return;
+    }
+
+    this.tweens.killTweensOf(label);
+    if (lane.chestLabelIdleTween) {
+      lane.chestLabelIdleTween.remove();
+      lane.chestLabelIdleTween = null;
+    }
+
+    label.setVisible(true);
+    label.setAlpha(1);
+    label.setX(lane.chestX);
+    label.setY(lane.chestLabelBaseY);
+    label.setScale(1);
+
+    if (eventId === 'jam') {
+      label.setColor(CHEST_LABEL_JAM_COLOR);
+      this.tweens.add({
+        targets: label,
+        x: { from: lane.chestX - 4, to: lane.chestX + 4 },
+        scaleX: 1.12,
+        scaleY: 1.12,
+        duration: 54,
+        yoyo: true,
+        repeat: 2,
+        ease: 'Sine.InOut',
+        onComplete: () => {
+          if (!label.active) {
+            return;
+          }
+
+          label.setColor(CHEST_LABEL_COLOR);
+          label.setX(lane.chestX);
+          label.setY(lane.chestLabelBaseY);
+          label.setScale(1);
+          this.startLaneChestLabelIdleTween(lane);
+        }
+      });
+      return;
+    }
+
+    label.setColor('#fff9ee');
+    this.tweens.add({
+      targets: label,
+      y: lane.chestLabelBaseY - 4,
+      scaleX: 1.13,
+      scaleY: 1.13,
+      duration: 84,
+      yoyo: true,
+      ease: 'Sine.Out',
+      onComplete: () => {
+        if (!label.active) {
+          return;
+        }
+
+        label.setColor(CHEST_LABEL_COLOR);
+        label.setX(lane.chestX);
+        label.setY(lane.chestLabelBaseY);
+        label.setScale(1);
+        this.startLaneChestLabelIdleTween(lane);
+      }
+    });
   }
 
   setLaneChestBubbleVisible(lane, visible) {
@@ -5958,7 +6120,10 @@ export default class GameScene extends Phaser.Scene {
 
       lane.chestBubbleRevealLocked = true;
       lane.chestBubbleSwapMs = 0;
+      lane.chestLabelRevealLocked = true;
       this.setLaneChestBubbleVisible(lane, false);
+      this.setLaneChestLabelVisible(lane, false);
+      this.refreshLaneChestLabelText(lane);
 
       const textureKeys = Array.isArray(lane.chestBubbleTextureKeys)
         ? lane.chestBubbleTextureKeys.filter((textureKey) => this.textures.exists(textureKey))
@@ -5968,7 +6133,9 @@ export default class GameScene extends Phaser.Scene {
         laneIds.push(lane.id);
       } else {
         lane.chestBubbleRevealLocked = false;
+        lane.chestLabelRevealLocked = false;
         this.setLaneChestBubbleVisible(lane, true);
+        this.revealLaneChestLabel(lane, { immediate: true });
       }
     });
 
@@ -6003,7 +6170,9 @@ export default class GameScene extends Phaser.Scene {
       : [];
     if (textureKeys.length === 0) {
       lane.chestBubbleRevealLocked = false;
+      lane.chestLabelRevealLocked = false;
       this.setLaneChestBubbleVisible(lane, true);
+      this.revealLaneChestLabel(lane, { immediate: true });
       this.playLevelChestIntroStep(sequenceToken, laneIds, laneIndex + 1);
       return;
     }
@@ -6100,6 +6269,7 @@ export default class GameScene extends Phaser.Scene {
 
           lane.chestBubbleTextureIndex = shuffleIndex;
           this.revealLaneChestBubble(lane, activeTextureKey);
+          this.revealLaneChestLabel(lane);
 
           this.tweens.add({
             targets: this.levelIntroDimOverlay,
@@ -6131,7 +6301,16 @@ export default class GameScene extends Phaser.Scene {
     this.teardownLevelChestIntroState({ destroyDim: true });
 
     for (const lane of Object.values(this.lanesById)) {
-      if (!lane?.chestBubbleIcon?.active) {
+      if (!lane) {
+        continue;
+      }
+
+      lane.chestLabelRevealLocked = false;
+      if (lane.chestLabelText?.active && !lane.chestLabelText.visible) {
+        this.revealLaneChestLabel(lane, { immediate: true });
+      }
+
+      if (!lane.chestBubbleIcon?.active) {
         continue;
       }
 
@@ -7295,1142 +7474,8 @@ export default class GameScene extends Phaser.Scene {
     this.startDroneSabotageRun(fallbackItem.id, fallbackDrop);
   }
 
-  shouldShowBeetleIncidentTutorial() {
-    this.loadBeetleIncidentTutorialPreference();
-    if (this.beetleTutorialDoNotShowAgain) {
-      return false;
-    }
-
-    if (this.beetleTutorialShownThisRun || this.beetleTutorialActive) {
-      return false;
-    }
-
-    if (this.levelMode === 'endless') {
-      return true;
-    }
-
-    if (this.levelMode !== 'campaign') {
-      return false;
-    }
-
-    const levelIndex = Number(this.levelConfig?.index);
-    return Number.isFinite(levelIndex) && levelIndex === JAM_BEETLE_INTRO_LEVEL_INDEX;
-  }
-
-  loadBeetleIncidentTutorialPreference() {
-    if (this.beetleTutorialPreferenceLoaded) {
-      return;
-    }
-
-    this.beetleTutorialPreferenceLoaded = true;
-    this.beetleTutorialDoNotShowAgain = false;
-
-    if (typeof window === 'undefined' || !window.localStorage) {
-      return;
-    }
-
-    try {
-      const raw = window.localStorage.getItem(BEETLE_TUTORIAL_DISABLE_STORAGE_KEY);
-      this.beetleTutorialDoNotShowAgain = raw === '1' || raw === 'true';
-    } catch {
-      this.beetleTutorialDoNotShowAgain = false;
-    }
-  }
-
-  setBeetleIncidentTutorialDisabled(disabled) {
-    this.beetleTutorialPreferenceLoaded = true;
-    this.beetleTutorialDoNotShowAgain = disabled === true;
-
-    if (typeof window === 'undefined' || !window.localStorage) {
-      return;
-    }
-
-    try {
-      if (this.beetleTutorialDoNotShowAgain) {
-        window.localStorage.setItem(BEETLE_TUTORIAL_DISABLE_STORAGE_KEY, '1');
-      } else {
-        window.localStorage.removeItem(BEETLE_TUTORIAL_DISABLE_STORAGE_KEY);
-      }
-    } catch {
-      // Ignore storage write failures.
-    }
-  }
-
-  updateBeetleIncidentTutorialUnlockState() {
-    if (!this.beetleTutorialActive) {
-      return;
-    }
-
-    const readyToClose = this.beetleTutorialButtonDelayReady
-      && this.beetleTutorialGoalSplatDone
-      && this.beetleTutorialGoalFlickDone;
-
-    this.pauseTransitionLock = !readyToClose;
-
-    const preview = this.beetleTutorialPreviewState;
-    preview?.understoodButton?.setEnabled?.(readyToClose);
-
-  }
-
-  cleanupBeetleIncidentTutorial({ resumeGameplay = false } = {}) {
-      const wasActive = this.beetleTutorialActive;
-
-      if (this.beetleTutorialButtonUnlockEvent) {
-        this.beetleTutorialButtonUnlockEvent.remove(false);
-        this.beetleTutorialButtonUnlockEvent = null;
-      }
-
-      if (this.beetleTutorialFlowEvent) {
-        this.beetleTutorialFlowEvent.remove(false);
-        this.beetleTutorialFlowEvent = null;
-      }
-
-      if (this.input?.off) {
-        this.input.off('pointermove', this.handleBeetleIncidentTutorialPointerMove, this);
-        this.input.off('pointerup', this.handleBeetleIncidentTutorialPointerUp, this);
-        this.input.off('pointerupoutside', this.handleBeetleIncidentTutorialPointerUp, this);
-      }
-
-      if (this.beetleTutorialPreviewState) {
-        const previewItems = Array.isArray(this.beetleTutorialPreviewState.items)
-          ? [...this.beetleTutorialPreviewState.items]
-          : [];
-
-        previewItems.forEach((item) => {
-          this.removeBeetleIncidentTutorialPreviewItem(item);
-        });
-
-        this.tweens.killTweensOf(this.beetleTutorialPreviewState.lane?.chestClawContainer);
-        this.tweens.killTweensOf(this.beetleTutorialPreviewState.lane?.chestSprite);
-      }
-
-      this.beetleTutorialPreviewState = null;
-
-      if (this.beetleTutorialOverlay?.active) {
-        this.tweens.killTweensOf(this.beetleTutorialOverlay);
-        this.beetleTutorialOverlay.destroy(true);
-      }
-
-      this.beetleTutorialOverlay = null;
-      this.beetleTutorialActive = false;
-      this.beetleTutorialGoalSplatDone = false;
-      this.beetleTutorialGoalFlickDone = false;
-      this.beetleTutorialButtonDelayReady = false;
-
-      if (wasActive) {
-        this.pauseTransitionLock = false;
-      }
-
-      if (
-        resumeGameplay
-        && !this.droneTutorialActive
-        && !this.isGameOver
-        && !this.levelComplete
-        && !this.sceneTransitioning
-        && !this.isDraftActive
-        && !this.levelIntroActive
-      ) {
-        this.isPaused = false;
-      }
-    }
-
-    removeBeetleIncidentTutorialPreviewItem(item) {
-      const preview = this.beetleTutorialPreviewState;
-      if (!preview || !item) {
-        return;
-      }
-
-      if (preview.dragContext?.item === item) {
-        preview.dragContext = null;
-      }
-
-      const previewItems = Array.isArray(preview.items) ? preview.items : [];
-      const itemIndex = previewItems.indexOf(item);
-      if (itemIndex >= 0) {
-        previewItems.splice(itemIndex, 1);
-      }
-
-      this.tweens.killTweensOf(item.container);
-      this.tweens.killTweensOf(item.grabHandle);
-
-      if (item.container?.active) {
-        item.container.destroy(true);
-      }
-
-      if (item.grabHandle?.active) {
-        item.grabHandle.destroy();
-      }
-    }
-
-    createBeetleIncidentTutorialPreviewItemVisual(typeId) {
-      if (typeId === JAM_BEETLE_TYPE_ID) {
-        const textureKey = this.jamBeetleTextureKeys[0] || null;
-        if (textureKey && this.textures.exists(textureKey)) {
-          const sprite = this.add.sprite(0, 0, textureKey);
-          const maxDim = Math.max(sprite.width || 1, sprite.height || 1);
-          sprite.setScale(JAM_BEETLE_RENDER_SIZE / maxDim);
-          if (this.anims.exists(JAM_BEETLE_ANIM_KEY)) {
-            sprite.play(JAM_BEETLE_ANIM_KEY);
-          }
-
-          return {
-            visual: sprite,
-            baseColor: JAM_BEETLE_COLOR,
-            isJamBeetle: true
-          };
-        }
-
-        return {
-          visual: this.add.circle(0, 0, JAM_BEETLE_RENDER_SIZE * 0.4, JAM_BEETLE_COLOR, 1).setStrokeStyle(2, 0x3a1013, 1),
-          baseColor: JAM_BEETLE_COLOR,
-          isJamBeetle: true
-        };
-      }
-
-      const greens = this.foodTypeById.greens;
-      const textureKeys = this.textureKeysByFoodId.greens || [];
-      if (textureKeys.length > 0) {
-        const textureKey = Phaser.Utils.Array.GetRandom(textureKeys);
-        const image = this.add.image(0, 0, textureKey);
-        const maxDim = Math.max(image.width || 1, image.height || 1);
-        image.setScale(FOOD_RENDER_SIZE / maxDim);
-
-        return {
-          visual: image,
-          baseColor: greens?.color || 0x22c55e,
-          isJamBeetle: false
-        };
-      }
-
-      return {
-        visual: this.add.rectangle(0, 0, FOOD_RENDER_SIZE, FOOD_RENDER_SIZE, greens?.color || 0x22c55e, 1).setStrokeStyle(1, 0x0f172a, 1),
-        baseColor: greens?.color || 0x22c55e,
-        isJamBeetle: false
-      };
-    }
-
-    spawnBeetleIncidentTutorialPreviewItem() {
-      if (!this.beetleTutorialActive) {
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      if (!preview?.previewContainer?.active || !preview?.lane) {
-        return;
-      }
-
-      const previewItems = Array.isArray(preview.items) ? preview.items : [];
-      if (previewItems.length >= 12) {
-        return;
-      }
-
-      const activeBeetleCount = previewItems.filter((item) => item.isJamBeetle && item.state !== 'consuming').length;
-      const mustSpawnBeetle = preview.forceBeetleSpawn === true || activeBeetleCount <= 0;
-      const canSpawnBeetle = activeBeetleCount < BEETLE_TUTORIAL_MAX_ACTIVE_BEETLES;
-      const shouldSpawnBeetle = canSpawnBeetle && (mustSpawnBeetle || Math.random() < 0.34);
-      const itemType = shouldSpawnBeetle ? JAM_BEETLE_TYPE_ID : 'greens';
-
-      const visualParts = this.createBeetleIncidentTutorialPreviewItemVisual(itemType);
-      const lane = preview.lane;
-      const spawnX = lane.intakeX;
-      const spawnY = lane.y;
-
-      const container = this.add.container(spawnX, spawnY, [visualParts.visual]).setDepth(374);
-      container.setAlpha(0);
-      container.setScale(0.18);
-      container.setAngle(Phaser.Math.Between(-12, 12));
-
-      this.tweens.add({
-        targets: container,
-        alpha: 1,
-        scaleX: 1,
-        scaleY: 1,
-        angle: 0,
-        duration: 195,
-        ease: 'Back.Out'
-      });
-
-      let grabHandle = null;
-      if (visualParts.isJamBeetle) {
-        grabHandle = this.add.zone(spawnX, spawnY, FOOD_RENDER_SIZE * 1.25, FOOD_RENDER_SIZE * 1.25).setDepth(375);
-        grabHandle.setInteractive({ useHandCursor: true });
-      }
-
-      const item = {
-        id: preview.nextItemId,
-        type: itemType,
-        isJamBeetle: visualParts.isJamBeetle,
-        baseColor: visualParts.baseColor,
-        itemVisual: visualParts.visual,
-        container,
-        grabHandle,
-        x: spawnX,
-        y: spawnY,
-        laneId: lane.id,
-        lanePos: 0,
-        state: 'side',
-        motionLock: false,
-        splatTapCount: 0,
-        ignoreTapUntilMs: 0,
-        jammedFxPlayed: false
-      };
-
-      preview.nextItemId += 1;
-      preview.items.push(item);
-      preview.previewContainer.add(container);
-      if (grabHandle) {
-        preview.previewContainer.add(grabHandle);
-        grabHandle.on('pointerdown', (pointer, _localX, _localY, event) => {
-          event?.stopPropagation();
-          this.beginBeetleIncidentTutorialDrag(item, pointer);
-        });
-      }
-
-      preview.forceBeetleSpawn = !shouldSpawnBeetle && activeBeetleCount <= 0;
-    }
-
-    beginBeetleIncidentTutorialDrag(item, pointer) {
-      if (!this.beetleTutorialActive || !item?.isJamBeetle || item.state === 'consuming') {
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      if (!preview?.previewContainer?.active || preview.dragContext) {
-        return;
-      }
-
-      const pointerX = Number(pointer?.worldX ?? pointer?.x);
-      const pointerY = Number(pointer?.worldY ?? pointer?.y);
-      if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) {
-        return;
-      }
-
-      const now = this.time?.now ?? Date.now();
-
-      item.motionLock = true;
-      item.state = 'dragging';
-      item.container.setDepth(378);
-      item.grabHandle?.setDepth(379);
-
-      preview.dragContext = {
-        item,
-        downX: pointerX,
-        downY: pointerY,
-        downTime: now,
-        prevX: pointerX,
-        prevY: pointerY,
-        prevTime: now,
-        lastX: pointerX,
-        lastY: pointerY,
-        lastTime: now,
-        moved: false
-      };
-    }
-
-    handleBeetleIncidentTutorialPointerMove(pointer) {
-      if (!this.beetleTutorialActive) {
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      const dragContext = preview?.dragContext;
-      const previewContainer = preview?.previewContainer;
-      const item = dragContext?.item;
-      if (!dragContext || !previewContainer?.active || !item?.container?.active) {
-        return;
-      }
-
-      const pointerX = Number(pointer?.worldX ?? pointer?.x);
-      const pointerY = Number(pointer?.worldY ?? pointer?.y);
-      if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) {
-        return;
-      }
-
-      const movedDistance = Phaser.Math.Distance.Between(dragContext.downX, dragContext.downY, pointerX, pointerY);
-      if (movedDistance >= JAM_BEETLE_GRAB_MIN_MOVEMENT) {
-        dragContext.moved = true;
-      }
-
-      dragContext.prevX = dragContext.lastX;
-      dragContext.prevY = dragContext.lastY;
-      dragContext.prevTime = dragContext.lastTime;
-      dragContext.lastX = pointerX;
-      dragContext.lastY = pointerY;
-      dragContext.lastTime = this.time?.now ?? Date.now();
-
-      item.x = pointerX - previewContainer.x;
-      item.y = pointerY - previewContainer.y;
-      item.container.setPosition(item.x, item.y);
-      item.grabHandle?.setPosition(item.x, item.y);
-    }
-
-    resumeBeetleIncidentTutorialFlow(item) {
-      if (!item?.container?.active) {
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      const lane = preview?.lane;
-      if (!preview || !lane) {
-        return;
-      }
-
-      const lanePos = Phaser.Math.Clamp((item.x - lane.intakeX) / lane.direction, 0, lane.length);
-      item.state = 'side';
-      item.motionLock = false;
-      item.lanePos = lanePos;
-      item.x = lane.intakeX + lane.direction * lanePos;
-      item.y = lane.y;
-      item.container.setPosition(item.x, item.y);
-      item.grabHandle?.setPosition(item.x, item.y);
-      item.container.setDepth(374);
-      item.grabHandle?.setDepth(375);
-    }
-
-    markBeetleIncidentTutorialGoal(goalType) {
-      if (!this.beetleTutorialActive) {
-        return;
-      }
-
-      if (goalType === 'splat' && !this.beetleTutorialGoalSplatDone) {
-        this.beetleTutorialGoalSplatDone = true;
-      }
-
-      if (goalType === 'flick' && !this.beetleTutorialGoalFlickDone) {
-        this.beetleTutorialGoalFlickDone = true;
-      }
-
-      this.updateBeetleIncidentTutorialUnlockState();
-    }
-
-    getBeetleIncidentTutorialFlickData(dragContext, pointer) {
-      const now = this.time?.now ?? Date.now();
-      const savedDragContext = this.dragContext;
-
-      this.dragContext = {
-        dragStartX: dragContext.downX,
-        dragStartY: dragContext.downY,
-        dragStartTime: dragContext.downTime,
-        prevDragX: dragContext.prevX,
-        prevDragY: dragContext.prevY,
-        prevDragTime: dragContext.prevTime,
-        lastDragX: dragContext.lastX,
-        lastDragY: dragContext.lastY,
-        lastDragTime: Number.isFinite(dragContext.lastTime) ? dragContext.lastTime : now
-      };
-
-      try {
-        return this.getJamBeetleFlickData(pointer);
-      } finally {
-        this.dragContext = savedDragContext;
-      }
-    }
-
-    handleBeetleIncidentTutorialTap(item) {
-      if (!item?.container?.active) {
-        return;
-      }
-
-      item.splatTapCount = (item.splatTapCount || 0) + 1;
-
-      if (item.splatTapCount >= JAM_BEETLE_TAPS_TO_SPLAT) {
-        this.splatBeetleIncidentTutorialBeetle(item);
-        this.markBeetleIncidentTutorialGoal('splat');
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      const previewContainer = preview?.previewContainer;
-      const worldX = (previewContainer?.x ?? 0) + item.x;
-      const worldY = (previewContainer?.y ?? 0) + item.y;
-
-      this.playSfx('jam', 0.76);
-      this.playImpactFx(0.36, 0xfb7185);
-      this.emitShockRing(worldX, worldY, 0xfb7185, 1.35, 140);
-
-      this.tweens.killTweensOf(item.container);
-      item.container.setAngle(0);
-
-      this.resumeBeetleIncidentTutorialFlow(item);
-
-      this.tweens.add({
-        targets: item.container,
-        scaleX: 1.14,
-        scaleY: 1.14,
-        angle: Phaser.Math.Between(-11, 11),
-        duration: 74,
-        yoyo: true,
-        ease: 'Sine.Out',
-        onComplete: () => {
-          if (!item?.container?.active) {
-            return;
-          }
-
-          item.container.setScale(1);
-          item.container.setAngle(0);
-        }
-      });
-    }
-
-    splatBeetleIncidentTutorialBeetle(item) {
-      if (!item?.container?.active) {
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      const previewContainer = preview?.previewContainer;
-      const worldX = (previewContainer?.x ?? 0) + item.x;
-      const worldY = (previewContainer?.y ?? 0) + item.y;
-
-      this.emitBloodParticles(worldX, worldY, 1.25);
-      this.emitJamParticles({ x: worldX, y: worldY, baseColor: JAM_BEETLE_COLOR });
-      this.emitTransferParticles(worldX, worldY, JAM_BEETLE_COLOR, 14);
-      this.emitShockRing(worldX, worldY, 0xfb7185, 2.55, 230);
-      this.emitFloatingText(worldX, worldY - 26, 'SPLAT!', '#ffdce2', 24);
-      this.playImpactFx(1.24, 0xfb7185);
-      this.playSfx('jam', 1.28);
-      this.rumble(0.48, 0.36, 136);
-
-      this.removeBeetleIncidentTutorialPreviewItem(item);
-    }
-
-    flickBeetleIncidentTutorialBeetle(item, flickData) {
-      if (!item?.container?.active) {
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      const previewContainer = preview?.previewContainer;
-      const worldX = (previewContainer?.x ?? 0) + item.x;
-      const worldY = (previewContainer?.y ?? 0) + item.y;
-      const textureKey = item.itemVisual?.texture?.key;
-
-      this.removeBeetleIncidentTutorialPreviewItem(item);
-
-      this.tossJamBeetle(
-        {
-          id: -1,
-          x: worldX,
-          y: worldY,
-          baseColor: JAM_BEETLE_COLOR,
-          isJamBeetle: true,
-          container: {
-            scaleX: Number(item.container?.scaleX) || 1,
-            scaleY: Number(item.container?.scaleY) || 1,
-            angle: Number(item.container?.angle) || 0
-          },
-          itemVisual: {
-            texture: typeof textureKey === 'string' ? { key: textureKey } : null,
-            scaleX: 1,
-            scaleY: 1
-          }
-        },
-        flickData,
-        { finishDragResolution: false }
-      );
-    }
-
-    handleBeetleIncidentTutorialPointerUp(pointer) {
-      if (!this.beetleTutorialActive) {
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      const dragContext = preview?.dragContext;
-      if (!dragContext) {
-        return;
-      }
-
-      const item = dragContext.item;
-      preview.dragContext = null;
-
-      if (!item?.container?.active) {
-        return;
-      }
-
-      const pointerX = Number(pointer?.worldX ?? pointer?.x);
-      const pointerY = Number(pointer?.worldY ?? pointer?.y);
-      if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) {
-        this.resumeBeetleIncidentTutorialFlow(item);
-        return;
-      }
-
-      const totalDistance = Phaser.Math.Distance.Between(dragContext.downX, dragContext.downY, pointerX, pointerY);
-      if (!dragContext.moved || totalDistance <= JAM_BEETLE_TAP_MAX_MOVEMENT) {
-        this.handleBeetleIncidentTutorialTap(item);
-        return;
-      }
-
-      const flickData = this.getBeetleIncidentTutorialFlickData(dragContext, pointer);
-      if (flickData?.isFlick === true) {
-        this.flickBeetleIncidentTutorialBeetle(item, flickData);
-        this.markBeetleIncidentTutorialGoal('flick');
-        return;
-      }
-
-      this.resumeBeetleIncidentTutorialFlow(item);
-    }
-
-    startBeetleIncidentTutorialChestIntake(item, lane) {
-      const preview = this.beetleTutorialPreviewState;
-      if (!item?.container?.active || !preview?.previewContainer?.active || !lane) {
-        return;
-      }
-
-      item.state = 'consuming';
-      item.motionLock = true;
-
-      if (item.grabHandle?.input?.enabled) {
-        item.grabHandle.disableInteractive();
-      }
-
-      lane.chestAnimToken = (lane.chestAnimToken || 0) + 1;
-      const activeChestToken = lane.chestAnimToken;
-      if (lane.chestSprite?.active && this.textures.exists(CHEST_CLOSED_KEY) && this.textures.exists(CHEST_OPENED_KEY)) {
-        this.tweens.killTweensOf(lane.chestSprite);
-        lane.chestSprite.setTexture(CHEST_OPENED_KEY);
-        lane.chestSprite.setScale(lane.chestBaseScale * 0.94);
-        this.tweens.add({
-          targets: lane.chestSprite,
-          scaleX: lane.chestBaseScale * 1.08,
-          scaleY: lane.chestBaseScale * 1.08,
-          duration: 90,
-          yoyo: true,
-          ease: 'Sine.InOut',
-          onComplete: () => {
-            if (!lane.chestSprite?.active || lane.chestAnimToken !== activeChestToken) {
-              return;
-            }
-
-            lane.chestSprite.setTexture(CHEST_CLOSED_KEY);
-            lane.chestSprite.setScale(lane.chestBaseScale);
-          }
-        });
-      }
-
-      if (lane.chestAura?.active) {
-        this.tweens.killTweensOf(lane.chestAura);
-        lane.chestAura.setAlpha(0.28);
-        lane.chestAura.setScale(0.92);
-        this.tweens.add({
-          targets: lane.chestAura,
-          alpha: 0.06,
-          scaleX: 1.34,
-          scaleY: 1.34,
-          duration: 280,
-          ease: 'Quad.Out'
-        });
-      }
-
-      const worldChestX = preview.previewContainer.x + lane.chestX;
-      const worldChestY = preview.previewContainer.y + lane.y;
-      this.emitTransferParticles(worldChestX, worldChestY, item.baseColor, 14);
-      this.playSfx('chest-accept', 1);
-
-      this.tweens.add({
-        targets: item.container,
-        x: lane.chestX,
-        y: lane.y,
-        alpha: 0.08,
-        scaleX: 0.2,
-        scaleY: 0.2,
-        duration: 180,
-        ease: 'Sine.In',
-        onComplete: () => {
-          this.removeBeetleIncidentTutorialPreviewItem(item);
-        }
-      });
-    }
-
-    animateBeetleIncidentTutorialLaneItemIntoChest(item, lane) {
-      if (!item || !lane || item.motionLock || item.state !== 'side') {
-        return false;
-      }
-
-      item.motionLock = true;
-
-      const finalizeAccept = () => {
-        this.startBeetleIncidentTutorialChestIntake(item, lane);
-      };
-
-      if (!lane.chestClawContainer?.active) {
-        finalizeAccept();
-        return true;
-      }
-
-      const claw = lane.chestClawContainer;
-      const baseAngle = lane.chestClawBaseAngle;
-      const targetAngle = baseAngle + lane.direction * 180;
-      const armLength = CLAW_ARM_LENGTH;
-
-      const speedFactorRaw = this.baseSideSpeed > 0 ? this.sideSpeed / this.baseSideSpeed : 1;
-      const speedFactor = Phaser.Math.Clamp(speedFactorRaw, 0.75, 3.25);
-      const pickDuration = Phaser.Math.Clamp((70 * CLAW_TIMING_SCALE) / speedFactor, 34, 96);
-      const rotateDuration = Phaser.Math.Clamp((210 * CLAW_TIMING_SCALE) / speedFactor, 96, 260);
-      const returnDuration = Phaser.Math.Clamp((180 * CLAW_TIMING_SCALE) / speedFactor, 86, 230);
-      const anticipationDuration = Phaser.Math.Clamp((58 * CLAW_TIMING_SCALE) / speedFactor, 26, 74);
-      const anticipationAngle = baseAngle - lane.direction * 11;
-
-      const holdLength = armLength + CLAW_JAW_LENGTH * 0.75;
-
-      const getHandLocalAtAngle = (angleDeg) => {
-        const theta = Phaser.Math.DegToRad(angleDeg);
-        return {
-          x: claw.x + Math.cos(theta) * -holdLength,
-          y: claw.y + Math.sin(theta) * -holdLength
-        };
-      };
-
-      const syncToContainer = () => {
-        item.x = item.container.x;
-        item.y = item.container.y;
-        item.grabHandle?.setPosition(item.x, item.y);
-      };
-
-      const placeAtHand = () => {
-        const hand = getHandLocalAtAngle(claw.angle);
-        item.x = hand.x;
-        item.y = hand.y;
-        item.container.setPosition(hand.x, hand.y);
-        item.grabHandle?.setPosition(hand.x, hand.y);
-      };
-
-      this.tweens.killTweensOf(claw);
-      claw.setAngle(baseAngle);
-
-      const startPickup = () => {
-        this.playClawSqueakSfx('pickup', 0.78);
-        const handStart = getHandLocalAtAngle(baseAngle);
-
-        const pickTween = this.tweens.add({
-          targets: item.container,
-          x: handStart.x,
-          y: handStart.y,
-          duration: pickDuration,
-          ease: 'Sine.Out',
-          onUpdate: syncToContainer,
-          onComplete: () => {
-            this.playClawSqueakSfx('move', 0.84);
-            const rotateTween = this.tweens.add({
-              targets: claw,
-              angle: targetAngle,
-              duration: rotateDuration,
-              ease: 'Sine.InOut',
-              onUpdate: placeAtHand,
-              onComplete: () => {
-                this.playClawSqueakSfx('drop', 0.8);
-                finalizeAccept();
-                const resetTween = this.tweens.add({
-                  targets: claw,
-                  angle: baseAngle,
-                  duration: returnDuration,
-                  ease: 'Sine.InOut'
-                });
-                resetTween.timeScale = this.getEffectiveSimulationTimeScale();
-              }
-            });
-            rotateTween.timeScale = this.getEffectiveSimulationTimeScale();
-          }
-        });
-        pickTween.timeScale = this.getEffectiveSimulationTimeScale();
-      };
-
-      const anticipationTween = this.tweens.add({
-        targets: claw,
-        angle: anticipationAngle,
-        duration: anticipationDuration,
-        yoyo: true,
-        ease: 'Sine.InOut',
-        onComplete: startPickup
-      });
-      anticipationTween.timeScale = this.getEffectiveSimulationTimeScale();
-
-      return true;
-    }
-
-    updateBeetleIncidentTutorialPreview(deltaMs) {
-      if (!this.beetleTutorialActive) {
-        return;
-      }
-
-      const preview = this.beetleTutorialPreviewState;
-      const lane = preview?.lane;
-      if (!preview?.previewContainer?.active || !lane) {
-        return;
-      }
-
-      const dt = deltaMs / 1000;
-
-      if (lane.beltLines?.active && lane.beltLineConfig) {
-        const spacing = lane.beltLineConfig.spacing;
-        lane.beltLineConfig.offset = (lane.beltLineConfig.offset + this.sideSpeed * dt * lane.direction) % spacing;
-        lane.beltLines.clear();
-        drawConveyorLines(lane.beltLines, lane.beltLineConfig);
-      }
-
-      preview.spawnTimerMs += deltaMs;
-      while (preview.spawnTimerMs >= preview.spawnIntervalMs) {
-        preview.spawnTimerMs -= preview.spawnIntervalMs;
-        this.spawnBeetleIncidentTutorialPreviewItem();
-      }
-
-      const previewItems = Array.isArray(preview.items) ? preview.items : [];
-      const sideSpacing = this.getActiveSideSpacing();
-      const laneItems = previewItems
-        .filter((item) => item.laneId === lane.id && (item.state === 'side' || item.state === 'jammed'))
-        .sort((a, b) => b.lanePos - a.lanePos);
-
-      let frontPos = null;
-      for (const item of laneItems) {
-        const maxAllowedPos = frontPos === null ? lane.length : Math.max(0, frontPos - sideSpacing);
-
-        if (item.state === 'jammed') {
-          item.lanePos = Math.min(item.lanePos, maxAllowedPos);
-          frontPos = item.lanePos;
-          continue;
-        }
-
-        if (item.state === 'side') {
-          if (item.motionLock) {
-            item.lanePos = Math.min(item.lanePos, maxAllowedPos);
-            frontPos = item.lanePos;
-            continue;
-          }
-
-          item.lanePos = Math.min(item.lanePos + this.sideSpeed * dt, maxAllowedPos);
-
-          if (item.lanePos >= lane.length) {
-            item.lanePos = lane.length;
-
-            if (item.isJamBeetle) {
-              item.state = 'jammed';
-              if (!item.jammedFxPlayed) {
-                const worldX = preview.previewContainer.x + (lane.intakeX + lane.direction * item.lanePos);
-                const worldY = preview.previewContainer.y + lane.y;
-                this.emitJamParticles({ x: worldX, y: worldY, baseColor: item.baseColor });
-                this.emitFloatingText(worldX, worldY - 24, 'JAM!', '#fb7185', 20);
-                this.emitShockRing(worldX, worldY, 0xef4444, 2.8, 280);
-                this.playSfx('jam', 1.2);
-                item.jammedFxPlayed = true;
-              }
-            } else if (item.type === 'greens') {
-              this.animateBeetleIncidentTutorialLaneItemIntoChest(item, lane);
-            } else {
-              item.state = 'jammed';
-            }
-          }
-        }
-
-        frontPos = item.lanePos;
-      }
-
-      const laneJammed = previewItems.some((item) => item.state === 'jammed');
-      lane.beltLines?.setAlpha(laneJammed ? 0.42 : 0.74);
-
-      for (const item of previewItems) {
-        if (item.state === 'dragging' || item.state === 'consuming' || item.motionLock) {
-          continue;
-        }
-
-        if (item.state === 'side' || item.state === 'jammed') {
-          item.x = lane.intakeX + lane.direction * item.lanePos;
-          item.y = lane.y;
-        }
-
-        if (item.container?.active) {
-          item.container.setPosition(item.x, item.y);
-        }
-
-        if (item.grabHandle?.active) {
-          item.grabHandle.setPosition(item.x, item.y);
-        }
-      }
-    }
-
-    createBeetleIncidentTutorialPreviewLane(previewContainer) {
-      const laneColor = this.foodTypeById.greens?.color || 0x22c55e;
-      const laneY = 0;
-      const laneWidth = BEETLE_TUTORIAL_BELT_WIDTH;
-      const laneCenterX = 0;
-      const laneDirection = 1;
-      const intakeX = -laneWidth * 0.5 + 6;
-      const endX = laneWidth * 0.5 - 6;
-      const chestX = endX + 58;
-
-      const beltShadow = this.add.ellipse(laneCenterX, laneY + 17, laneWidth + 30, 20, 0x020617, 0.32);
-      const beltBody = this.add
-        .rectangle(laneCenterX, laneY, laneWidth, SIDE_BELT_HEIGHT, 0x5b2d1a, 1)
-        .setStrokeStyle(2, 0xd39a67, 1);
-      const beltLines = this.add.graphics();
-      const beltLineConfig = {
-        x: laneCenterX,
-        y: laneY,
-        width: laneWidth,
-        height: SIDE_BELT_HEIGHT,
-        orientation: 'horizontal',
-        spacing: 26,
-        margin: 9,
-        offset: 0
-      };
-      drawConveyorLines(beltLines, beltLineConfig);
-      beltLines.setAlpha(0.74);
-
-      const chestAura = this.add.circle(chestX, laneY, 52, laneColor, 0.12).setAlpha(0.04);
-      chestAura.setBlendMode(Phaser.BlendModes.ADD);
-
-      const hasChestSprites = this.textures.exists(CHEST_CLOSED_KEY) && this.textures.exists(CHEST_OPENED_KEY);
-      let chestSprite = null;
-      let chestBaseScale = 1;
-      if (hasChestSprites) {
-        chestSprite = this.add.image(chestX, laneY, CHEST_CLOSED_KEY);
-        const chestMaxSize = Math.max(chestSprite.width || 1, chestSprite.height || 1);
-        chestBaseScale = chestMaxSize > 0 ? 92 / chestMaxSize : 1;
-        chestSprite.setScale(chestBaseScale);
-      } else {
-        chestSprite = this.add.rectangle(chestX, laneY, 102, 52, 0x704124, 1).setStrokeStyle(3, laneColor, 1);
-        chestBaseScale = 1;
-      }
-
-      const chestClawX = endX + laneDirection * 18;
-      const chestClawContainer = this.add.container(chestClawX, laneY);
-      const chestClawBaseAngle = laneDirection > 0 ? 0 : 180;
-      chestClawContainer.setAngle(chestClawBaseAngle);
-      const chestClawBase = this.add.circle(0, 0, CLAW_RADIUS - 4, 0x6b3418, 1).setStrokeStyle(2, laneColor, 1);
-      const chestClawGraphics = this.add.graphics();
-      chestClawGraphics.lineStyle(4, 0xffd7ab, 1);
-      chestClawGraphics.lineBetween(0, 0, -CLAW_ARM_LENGTH, 0);
-      chestClawGraphics.lineStyle(4, laneColor, 1);
-      chestClawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, -CLAW_JAW_SPREAD);
-      chestClawGraphics.lineBetween(-CLAW_ARM_LENGTH, 0, -CLAW_ARM_LENGTH - CLAW_JAW_LENGTH, CLAW_JAW_SPREAD);
-      chestClawContainer.add([chestClawGraphics, chestClawBase]);
-
-      previewContainer.add([
-        beltShadow,
-        beltBody,
-        beltLines,
-        chestAura,
-        chestSprite,
-        chestClawContainer
-      ]);
-
-      return {
-        id: 'beetle_tutorial_greens_lane',
-        y: laneY,
-        direction: laneDirection,
-        intakeX,
-        endX,
-        chestX,
-        length: Math.max(0, Math.abs(intakeX - endX) - CHEST_PICKUP_BUFFER),
-        desiredType: 'greens',
-        beltBody,
-        beltLines,
-        beltLineConfig,
-        chestAura,
-        chestSprite,
-        chestBaseScale,
-        chestClawContainer,
-        chestClawBaseAngle,
-        chestAnimToken: 0
-      };
-    }
-
-    startBeetleIncidentTutorial() {
-      if (this.beetleTutorialActive || !this.shouldShowBeetleIncidentTutorial()) {
-        return false;
-      }
-
-      if (
-        this.droneTutorialActive
-        || this.sceneTransitioning
-        || this.isGameOver
-        || this.levelComplete
-        || this.levelIntroActive
-        || this.isDraftActive
-      ) {
-        return false;
-      }
-
-      this.beetleTutorialShownThisRun = true;
-      this.beetleTutorialActive = true;
-      this.beetleTutorialGoalSplatDone = false;
-      this.beetleTutorialGoalFlickDone = false;
-      this.beetleTutorialButtonDelayReady = false;
-
-      this.abortActiveDrag();
-      this.isPaused = true;
-
-      const overlay = this.add.container(0, 0).setDepth(368);
-      const scrim = this.add.rectangle(640, 360, 1280, 720, 0x0b1220, 0.72).setInteractive();
-      scrim.on('pointerdown', (_pointer, _x, _y, event) => {
-        event?.stopPropagation();
-      });
-
-      const softBlurLayer = this.add
-        .rectangle(640, 360, 1280, 720, 0xe2e8f0, 0.05)
-        .setBlendMode(Phaser.BlendModes.SCREEN);
-
-      const panelX = 640;
-      const panelY = 362;
-      const panelShadow = this.add.rectangle(panelX, panelY + 9, DRONE_TUTORIAL_PANEL_WIDTH, DRONE_TUTORIAL_PANEL_HEIGHT, 0x020617, 0.56);
-      const panel = this.add
-        .rectangle(panelX, panelY, DRONE_TUTORIAL_PANEL_WIDTH, DRONE_TUTORIAL_PANEL_HEIGHT, 0x4a2012, 0.97)
-        .setStrokeStyle(2, 0xf0bd85, 0.95);
-      const panelTopStrip = this.add.rectangle(panelX, panelY - 236, DRONE_TUTORIAL_PANEL_WIDTH - 74, 40, 0xffffff, 0.14);
-
-      const title = this.add
-        .text(panelX, panelY - 234, 'BEETLE INCIDENT', {
-          fontFamily: GAME_DISPLAY_FONT,
-          fontSize: '44px',
-          color: '#fff1e6',
-          align: 'center'
-        })
-        .setOrigin(0.5)
-        .setLetterSpacing(1.2)
-        .setShadow(0, 3, '#000000', 8);
-
-      const previewShadow = this.add.rectangle(640, DRONE_TUTORIAL_VIEWPORT_Y + 6, DRONE_TUTORIAL_VIEWPORT_WIDTH, DRONE_TUTORIAL_VIEWPORT_HEIGHT, 0x020617, 0.48);
-      const previewFrame = this.add
-        .rectangle(640, DRONE_TUTORIAL_VIEWPORT_Y, DRONE_TUTORIAL_VIEWPORT_WIDTH, DRONE_TUTORIAL_VIEWPORT_HEIGHT, 0x1f2937, 0.94)
-        .setStrokeStyle(2, 0xf0bd85, 0.72);
-
-      const previewContainer = this.add.container(640, DRONE_TUTORIAL_VIEWPORT_Y).setDepth(372);
-      const lane = this.createBeetleIncidentTutorialPreviewLane(previewContainer);
-
-      const description = this.add
-        .text(
-          640,
-          520,
-          'Flick the beetles away on the conveyor belt, or tap them to splat.',
-          {
-            fontFamily: GAME_UI_FONT,
-            fontSize: '24px',
-            color: '#fde68a',
-            align: 'center',
-            wordWrap: { width: 792, useAdvancedWrap: true },
-            lineSpacing: 5
-          }
-        )
-        .setOrigin(0.5)
-        .setShadow(0, 2, '#000000', 8);
-
-      overlay.add([
-        scrim,
-        softBlurLayer,
-        panelShadow,
-        panel,
-        panelTopStrip,
-        title,
-        previewShadow,
-        previewFrame,
-        previewContainer,
-        description
-      ]);
-
-      const tutorialButtonStyle = {
-        bodyColor: 0x16a34a,
-        bodyHoverColor: 0x22c55e,
-        glossAlpha: 0.14,
-        textColor: '#f0fdf4',
-        textShadowColor: '#064e3b',
-        disabledBodyColor: 0x6b7280,
-        disabledBodyHoverColor: 0x6b7280,
-        disabledGlossAlpha: 0.08,
-        disabledTextColor: '#e5e7eb',
-        disabledTextShadowColor: '#374151',
-        disabledAccentColor: 0xd1d5db,
-        enabled: false
-      };
-
-      let doNotShowAgain = false;
-      const checkboxContainer = this.add.container(640, 558).setDepth(374);
-      const checkboxBody = this.add.rectangle(-96, 0, 22, 22, 0x0f172a, 0.95).setStrokeStyle(2, 0x94a3b8, 0.95);
-      const checkboxFill = this.add.rectangle(-96, 0, 12, 12, 0x86efac, 1).setVisible(false);
-      const checkboxLabel = this.add
-        .text(16, 0, 'Do not show again', {
-          fontFamily: GAME_UI_FONT,
-          fontSize: '18px',
-          color: '#dbeafe',
-          align: 'center'
-        })
-        .setOrigin(0.5)
-        .setShadow(0, 2, '#000000', 3);
-      const checkboxHit = this.add.zone(0, 0, 300, 30).setInteractive({ useHandCursor: true });
-
-      const syncCheckboxVisual = () => {
-        checkboxFill.setVisible(doNotShowAgain);
-        checkboxBody.setStrokeStyle(2, doNotShowAgain ? 0x86efac : 0x94a3b8, 0.95);
-        checkboxLabel.setColor(doNotShowAgain ? '#bbf7d0' : '#dbeafe');
-      };
-
-      checkboxHit.on('pointerdown', (_pointer, _x, _y, event) => {
-        event?.stopPropagation();
-        doNotShowAgain = !doNotShowAgain;
-        syncCheckboxVisual();
-      });
-
-      checkboxContainer.add([checkboxBody, checkboxFill, checkboxLabel, checkboxHit]);
-      overlay.add(checkboxContainer);
-      syncCheckboxVisual();
-
-      this.pauseTransitionLock = true;
-      const understoodButton = this.createPauseMenuEntry(
-        overlay,
-        'Understood',
-        610,
-        0x86efac,
-        () => {
-          if (!this.beetleTutorialGoalSplatDone || !this.beetleTutorialGoalFlickDone) {
-            return;
-          }
-
-          this.setBeetleIncidentTutorialDisabled(doNotShowAgain);
-          this.pauseTransitionLock = false;
-          this.cleanupBeetleIncidentTutorial({ resumeGameplay: true });
-        },
-        tutorialButtonStyle
-      );
-
-      this.beetleTutorialOverlay = overlay;
-      this.beetleTutorialPreviewState = {
-        previewContainer,
-        lane,
-        items: [],
-        nextItemId: 1,
-        dragContext: null,
-        spawnTimerMs: 0,
-        spawnIntervalMs: BEETLE_TUTORIAL_FLOW_SPAWN_INTERVAL_MS,
-        forceBeetleSpawn: true,
-        understoodButton
-      };
-
-      this.input.on('pointermove', this.handleBeetleIncidentTutorialPointerMove, this);
-      this.input.on('pointerup', this.handleBeetleIncidentTutorialPointerUp, this);
-      this.input.on('pointerupoutside', this.handleBeetleIncidentTutorialPointerUp, this);
-
-      this.spawnBeetleIncidentTutorialPreviewItem();
-      this.spawnBeetleIncidentTutorialPreviewItem();
-      this.spawnBeetleIncidentTutorialPreviewItem();
-
-      this.beetleTutorialFlowEvent = this.time.addEvent({
-        delay: 33,
-        loop: true,
-        callback: () => {
-          this.updateBeetleIncidentTutorialPreview(33);
-        }
-      });
-
-      this.beetleTutorialButtonUnlockEvent = this.time.delayedCall(BEETLE_TUTORIAL_BUTTON_LOCK_MS, () => {
-        this.beetleTutorialButtonUnlockEvent = null;
-        if (!this.beetleTutorialActive) {
-          return;
-        }
-
-        this.beetleTutorialButtonDelayReady = true;
-        this.updateBeetleIncidentTutorialUnlockState();
-      });
-
-      this.updateBeetleIncidentTutorialUnlockState();
-      return true;
+  resetDroneSabotageTimer(minMs = DRONE_SABOTAGE_MIN_COOLDOWN_MS, maxMs = DRONE_SABOTAGE_MAX_COOLDOWN_MS) {
+    this.droneSabotageTimerMs = Phaser.Math.Between(minMs, maxMs);
   }
 
   cleanupDroneSabotage(preserveTimer = false) {
@@ -9522,7 +8567,7 @@ export default class GameScene extends Phaser.Scene {
 
     lane.desiredType = foodType.id;
     lane.label = foodType.label;
-    lane.chestLabel = `${foodType.label} Chest`;
+    lane.chestLabel = `${this.getLaneChestLabelText({ desiredType: foodType.id, label: foodType.label })} Chest`;
     lane.chestBubbleTextureKeys = (
       this.chestBubbleTextureKeysByFoodId[foodType.id]
       || this.textureKeysByFoodId[foodType.id]
@@ -9536,6 +8581,7 @@ export default class GameScene extends Phaser.Scene {
 
     const bubbleTexture = lane.chestBubbleTextureKeys[lane.chestBubbleTextureIndex] || lane.chestBubbleTextureKeys[0] || null;
     this.revealLaneChestBubble(lane, bubbleTexture);
+    this.refreshLaneChestLabelText(lane);
 
     if (lane.chestAura?.active) {
       lane.chestAura.setFillStyle(foodType.color, 0.12);
@@ -9970,10 +9016,6 @@ export default class GameScene extends Phaser.Scene {
     this.emitTransferParticles(spawnX, spawnY, itemColor, 6);
 
     this.nextItemId += 1;
-
-    if (spawnJamBeetle) {
-      this.startBeetleIncidentTutorial();
-    }
   }
 
   setupGrabControls() {
@@ -11400,6 +10442,7 @@ export default class GameScene extends Phaser.Scene {
               this.applyItemStateTint(item, 0x64748b);
               this.emitJamParticles(item);
               this.pulseLaneVisual(lane.id, 1.05, true);
+              this.playLaneChestLabelEvent(lane, 'jam');
               this.playImpactFx(0.82, 0xef4444);
               this.emitFloatingText(item.x, item.y - 24, 'JAM!', '#fb7185', 20);
               this.emitShockRing(item.x, item.y, 0xef4444, 2.8, 280);
@@ -11462,6 +10505,7 @@ export default class GameScene extends Phaser.Scene {
 
   playChestReceiveAnimation(lane) {
     this.pulseLaneVisual(lane.id, 0.82);
+    this.playLaneChestLabelEvent(lane, 'consume');
 
     if (!lane.chestSprite || !this.textures.exists(CHEST_CLOSED_KEY) || !this.textures.exists(CHEST_OPENED_KEY)) {
       return;
