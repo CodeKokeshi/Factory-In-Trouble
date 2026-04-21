@@ -347,17 +347,6 @@ export default class MainMenuScene extends Phaser.Scene {
       ease: 'Quad.Out'
     });
 
-    this.add
-      .text(640, 666, 'Arrows/WASD to choose, Enter/Space or Click to confirm', {
-        fontFamily: MENU_UI_FONT,
-        fontSize: '28px',
-        color: '#ffd8ad',
-        align: 'center'
-      })
-      .setOrigin(0.5)
-      .setLetterSpacing(1)
-      .setAlpha(0.92);
-
     this.refreshSelection();
     this.bindInput();
 

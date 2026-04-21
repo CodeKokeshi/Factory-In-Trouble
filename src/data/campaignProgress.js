@@ -1,4 +1,4 @@
-const CAMPAIGN_COMPLETED_STORAGE_KEY = 'machines_phaser_campaign_completed_v1';
+const CAMPAIGN_COMPLETED_STORAGE_KEY = 'machines_phaser_campaign_completed_v2';
 
 function getCampaignStorage() {
   if (typeof window === 'undefined' || !window.localStorage) {

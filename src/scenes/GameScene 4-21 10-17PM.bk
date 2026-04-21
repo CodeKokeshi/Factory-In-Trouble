@@ -446,7 +446,6 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBody = null;
     this.pauseButtonBars = [];
     this.pauseMenuContainer = null;
-    this.pauseMenuFailSafeEvent = null;
     this.clogTimerSeconds = 0;
     this.clogGraceSeconds = 1.4;
     this.gameOverOverlay = null;
@@ -1067,7 +1066,6 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBody = null;
     this.pauseButtonBars = [];
     this.pauseMenuContainer = null;
-    this.clearPauseMenuFailSafe();
     this.levelComplete = false;
     this.clogTimerSeconds = 0;
     this.gameOverOverlay = null;
@@ -1478,7 +1476,6 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBody = null;
     this.pauseButtonBars = [];
     this.pauseMenuContainer = null;
-    this.clearPauseMenuFailSafe();
     this.cleanupDroneSabotage(true);
 
     this.stopBgmSource();
@@ -1512,20 +1509,6 @@ export default class GameScene extends Phaser.Scene {
   }
 
   handleGameplayKeyDown(event) {
-    const key = String(event?.key || '').toLowerCase();
-    if (key === 'escape' || event?.code === 'Escape') {
-      if (this.pauseTransitionLock || this.isGameOver || this.levelComplete || this.sceneTransitioning || this.isDraftActive) {
-        return;
-      }
-
-      if (this.isPaused) {
-        this.resumeFromPause();
-      } else {
-        this.handlePauseButtonPressed();
-      }
-      return;
-    }
-
     const keyCode = Number(event?.keyCode ?? event?.which ?? -1);
     if (keyCode !== this.tutorialResetHotkeyCode || event?.repeat) {
       return;
@@ -4676,13 +4659,6 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBars = [leftBar, rightBar];
   }
 
-  clearPauseMenuFailSafe() {
-    if (this.pauseMenuFailSafeEvent) {
-      this.pauseMenuFailSafeEvent.remove(false);
-      this.pauseMenuFailSafeEvent = null;
-    }
-  }
-
   handlePauseButtonPressed() {
     if (
       this.isPaused
@@ -4697,31 +4673,12 @@ export default class GameScene extends Phaser.Scene {
     this.pauseTransitionLock = true;
     this.isPaused = true;
     this.abortActiveDrag();
-    if (this.droneActive) {
-      this.cleanupDroneSabotage(true);
-      this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
-    }
 
     if (!this.pauseButtonContainer?.active) {
-      this.clearPauseMenuFailSafe();
       this.pauseTransitionLock = false;
       this.openPauseMenu();
       return;
     }
-
-    this.clearPauseMenuFailSafe();
-    this.pauseMenuFailSafeEvent = this.time.delayedCall(320, () => {
-      this.pauseMenuFailSafeEvent = null;
-      if (!this.isPaused || this.sceneTransitioning || this.isGameOver || this.levelComplete) {
-        this.pauseTransitionLock = false;
-        return;
-      }
-
-      if (!this.pauseMenuContainer?.active) {
-        this.openPauseMenu();
-      }
-      this.pauseTransitionLock = false;
-    });
 
     this.tweens.killTweensOf(this.pauseButtonContainer);
     this.pauseButtonBars.forEach((bar) => this.tweens.killTweensOf(bar));
@@ -4734,7 +4691,6 @@ export default class GameScene extends Phaser.Scene {
       yoyo: true,
       ease: 'Quad.Out',
       onComplete: () => {
-        this.clearPauseMenuFailSafe();
         this.openPauseMenu();
         this.pauseTransitionLock = false;
       }
@@ -4753,8 +4709,6 @@ export default class GameScene extends Phaser.Scene {
     if (!this.isPaused || this.pauseMenuContainer?.active) {
       return;
     }
-
-    this.clearPauseMenuFailSafe();
 
     const container = this.add.container(0, 0).setDepth(370);
     const scrim = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.72).setInteractive();
@@ -4913,7 +4867,6 @@ export default class GameScene extends Phaser.Scene {
   }
 
   closePauseMenu(animate = true, onComplete = null) {
-    this.clearPauseMenuFailSafe();
     const complete = () => {
       this.pauseMenuContainer = null;
       if (typeof onComplete === 'function') {
@@ -6627,35 +6580,16 @@ export default class GameScene extends Phaser.Scene {
       return false;
     }
 
-    return this.clawBreakdownEnabled === true;
-  }
+    if (this.levelMode === 'endless') {
+      return true;
+    }
 
-  isClawBreakdownTutorialBlockedNow() {
-    return (
-      this.sceneTransitioning
-      || this.isGameOver
-      || this.levelComplete
-      || this.levelIntroActive
-      || this.isDraftActive
-      || this.droneActive
-      || this.droneTutorialActive
-      || this.beetleTutorialActive
-      || this.laneSwapActive
-    );
-  }
-
-  tryStartPendingClawBreakdownTutorial() {
-    if (!this.shouldShowClawBreakdownTutorial() || this.isClawBreakdownTutorialBlockedNow()) {
+    if (this.levelMode !== 'campaign') {
       return false;
     }
 
-    const pendingLane = this.lanesById?.[this.clawBreakTutorialPendingLaneId] || null;
-    if (!pendingLane?.clawOverheated) {
-      this.clawBreakTutorialPendingLaneId = null;
-      return false;
-    }
-
-    return this.startClawBreakdownTutorial(pendingLane);
+    const levelIndex = Number(this.levelConfig?.index);
+    return Number.isFinite(levelIndex) && levelIndex >= CLAW_BREAKDOWN_INTRO_LEVEL_INDEX;
   }
 
   loadClawBreakdownTutorialPreference() {
@@ -6763,7 +6697,6 @@ export default class GameScene extends Phaser.Scene {
   }
 
   showClawBreakdownWarning(lane) {
-    this.clawBreakTutorialPendingLaneId = lane?.id ?? null;
     this.startClawBreakdownTutorial(lane);
   }
 
@@ -6772,21 +6705,23 @@ export default class GameScene extends Phaser.Scene {
       return false;
     }
 
-    if (this.isClawBreakdownTutorialBlockedNow()) {
-      return false;
-    }
-
-    const activeLane = lane?.clawOverheated
-      ? lane
-      : (this.lanesById?.[this.clawBreakTutorialPendingLaneId] || null);
-    if (!activeLane?.clawOverheated) {
-      this.clawBreakTutorialPendingLaneId = null;
+    if (
+      this.sceneTransitioning
+      || this.isGameOver
+      || this.levelComplete
+      || this.levelIntroActive
+      || this.isDraftActive
+      || this.droneActive
+      || this.droneTutorialActive
+      || this.beetleTutorialActive
+      || this.laneSwapActive
+    ) {
       return false;
     }
 
     this.clawBreakTutorialShownThisRun = true;
     this.clawBreakTutorialActive = true;
-    this.clawBreakTutorialPendingLaneId = activeLane.id;
+    this.clawBreakTutorialPendingLaneId = lane?.id ?? null;
 
     this.abortActiveDrag();
     this.isPaused = true;
@@ -6807,7 +6742,7 @@ export default class GameScene extends Phaser.Scene {
     const panelWidth = 892;
     const panelHeight = 562;
 
-    const laneLabel = String(activeLane?.id || 'lane').replace(/_/g, ' ').toUpperCase();
+    const laneLabel = String(lane?.id || 'lane').replace(/_/g, ' ').toUpperCase();
     const panelShadow = this.add.rectangle(panelX, panelY + 9, panelWidth, panelHeight, 0x020617, 0.56);
     const panel = this.add
       .rectangle(panelX, panelY, panelWidth, panelHeight, 0x4a2012, 0.97)
@@ -7355,10 +7290,6 @@ export default class GameScene extends Phaser.Scene {
   updateClawBreakdowns(deltaMs) {
     if (!this.clawBreakdownEnabled || deltaMs <= 0) {
       return;
-    }
-
-    if (this.clawBreakTutorialPendingLaneId && !this.clawBreakTutorialActive) {
-      this.tryStartPendingClawBreakdownTutorial();
     }
 
     for (const lane of Object.values(this.lanesById)) {
@@ -8550,31 +8481,8 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  shouldSuspendDroneSabotage() {
-    return (
-      this.isPaused
-      || this.isDraftActive
-      || this.isGameOver
-      || this.levelComplete
-      || this.sceneTransitioning
-      || this.levelIntroActive
-    );
-  }
-
   updateDroneSabotage(deltaMs) {
-    if (!this.isDroneSabotageLevelEnabled() || this.laneSwapActive || deltaMs <= 0) {
-      return;
-    }
-
-    if (this.shouldSuspendDroneSabotage()) {
-      if (this.droneActive) {
-        this.cleanupDroneSabotage(true);
-        this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
-      }
-      return;
-    }
-
-    if (this.droneActive) {
+    if (!this.isDroneSabotageLevelEnabled() || this.droneActive || this.laneSwapActive || deltaMs <= 0) {
       return;
     }
 
@@ -9069,7 +8977,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   startDroneSabotageRun(targetItemId, plannedDrop) {
-    if (this.droneActive || this.shouldSuspendDroneSabotage()) {
+    if (this.droneActive) {
       return;
     }
 
@@ -9085,8 +8993,8 @@ export default class GameScene extends Phaser.Scene {
         return;
       }
 
-      if (this.shouldSuspendDroneSabotage()) {
-        this.cleanupDroneSabotage(true);
+      if (this.isGameOver || this.levelComplete || this.sceneTransitioning) {
+        this.droneActive = false;
         this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
         return;
       }
@@ -9128,12 +9036,6 @@ export default class GameScene extends Phaser.Scene {
             return;
           }
 
-          if (this.shouldSuspendDroneSabotage()) {
-            this.cleanupDroneSabotage(true);
-            this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
-            return;
-          }
-
           const latestItem = this.getItemById(pickupItem.id);
           if (!this.isDroneSabotagePickupCandidate(latestItem)) {
             if (!hasRetried) {
@@ -9162,12 +9064,6 @@ export default class GameScene extends Phaser.Scene {
               return;
             }
 
-            if (this.shouldSuspendDroneSabotage()) {
-              this.cleanupDroneSabotage(true);
-              this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
-              return;
-            }
-
             const carried = this.getItemById(this.droneCarryItemId);
             if (carried) {
               runtimeDropPlan = this.resolveDroneSabotageDropPlan(carried, runtimeDropPlan) || runtimeDropPlan;
@@ -9183,12 +9079,6 @@ export default class GameScene extends Phaser.Scene {
                 return;
               }
 
-              if (this.shouldSuspendDroneSabotage()) {
-                this.cleanupDroneSabotage(true);
-                this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
-                return;
-              }
-
               const carriedAtDrop = this.getItemById(this.droneCarryItemId);
               if (carriedAtDrop) {
                 this.releaseItemFromDrone(carriedAtDrop, runtimeDropPlan);
@@ -9199,12 +9089,6 @@ export default class GameScene extends Phaser.Scene {
 
               this.time.delayedCall(DRONE_DROP_HOLD_MS, () => {
                 if (runToken !== this.droneRunToken || !this.droneActive) {
-                  return;
-                }
-
-                if (this.shouldSuspendDroneSabotage()) {
-                  this.cleanupDroneSabotage(true);
-                  this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
                   return;
                 }
 

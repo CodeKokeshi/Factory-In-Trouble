@@ -32,8 +32,8 @@ const FOOD_PREVIEW_TEXTURES = Object.entries(FOOD_PREVIEW_GLOBS).reduce((acc, [f
 
 const SELECT_DISPLAY_FONT = "'Lilita One', 'Bebas Neue', 'Segoe UI', sans-serif";
 const SELECT_UI_FONT = "'Nunito', 'Rajdhani', 'Segoe UI', sans-serif";
-// Temporary test switch: set to false to restore sequential campaign unlock progression.
-const FORCE_UNLOCK_ALL_LEVELS_FOR_TESTING = true;
+// Temporary test switch: keep false for normal sequential unlock progression.
+const FORCE_UNLOCK_ALL_LEVELS_FOR_TESTING = false;
 
 export default class LevelSelectScene extends Phaser.Scene {
   constructor() {
@@ -145,26 +145,34 @@ export default class LevelSelectScene extends Phaser.Scene {
       ease: 'Sine.InOut'
     });
     const entryCount = this.levelEntries.length;
-    if (entryCount > 10) {
+    if (entryCount > 12) {
       this.gridColumns = 5;
-    } else if (entryCount > 6) {
+    } else if (entryCount > 9) {
       this.gridColumns = 4;
     } else {
       this.gridColumns = 3;
     }
 
-    const tileWidth = this.gridColumns === 5 ? 226 : this.gridColumns === 4 ? 266 : 316;
-    const tileHeight = this.gridColumns === 5 ? 156 : this.gridColumns === 4 ? 176 : 198;
-    const gapX = this.gridColumns === 5 ? 16 : 20;
-    const gapY = this.gridColumns === 5 ? 18 : 22;
+    let tileWidth = this.gridColumns === 5 ? 226 : this.gridColumns === 4 ? 266 : 316;
+    let tileHeight = this.gridColumns === 5 ? 156 : this.gridColumns === 4 ? 176 : 198;
+    let gapX = this.gridColumns === 5 ? 16 : 20;
+    let gapY = this.gridColumns === 5 ? 18 : 22;
 
     const rows = Math.ceil(entryCount / this.gridColumns);
-    const totalWidth = this.gridColumns * tileWidth + (this.gridColumns - 1) * gapX;
-    const totalHeight = rows * tileHeight + (rows - 1) * gapY;
-
     const gridTop = 148;
     const gridBottom = 662;
     const gridAreaHeight = gridBottom - gridTop;
+    let totalWidth = this.gridColumns * tileWidth + (this.gridColumns - 1) * gapX;
+    let totalHeight = rows * tileHeight + (rows - 1) * gapY;
+
+    // Keep selector cards inside the panel even with many campaign levels.
+    if (rows > 1 && totalHeight > gridAreaHeight) {
+      const fitScale = gridAreaHeight / Math.max(1, totalHeight);
+      tileHeight = Math.max(136, Math.floor(tileHeight * fitScale));
+      gapY = Math.max(10, Math.floor(gapY * fitScale));
+      totalHeight = rows * tileHeight + (rows - 1) * gapY;
+    }
+
     const centeredTop = gridTop + Math.max(0, (gridAreaHeight - totalHeight) * 0.5);
 
     const startX = (1280 - totalWidth) * 0.5 + tileWidth * 0.5;
@@ -202,17 +210,6 @@ export default class LevelSelectScene extends Phaser.Scene {
       });
     });
 
-    this.add
-      .text(640, 688, 'Arrows/WASD + Enter/Space', {
-        fontFamily: SELECT_UI_FONT,
-        fontSize: '24px',
-        color: '#ffd9af',
-        align: 'center'
-      })
-      .setOrigin(0.5)
-      .setLetterSpacing(0.8)
-      .setAlpha(0.92);
-
     this.refreshSelectionVisuals();
 
     this.input.keyboard?.on('keydown-LEFT', this.moveSelectionLeft, this);
@@ -245,7 +242,7 @@ export default class LevelSelectScene extends Phaser.Scene {
   createLevelTile(x, y, width, height, entry, index) {
     const compact = width <= 240;
     const quotaValue = Number.isFinite(entry.quota) ? Math.max(0, Math.floor(entry.quota)) : 0;
-    const title = `LEVEL ${entry.index}`;
+    const title = entry.shortLabel || `LEVEL ${entry.index}`;
     const subtitle = '';
     const shiftLabel = `L${entry.index}`;
 
