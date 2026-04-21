@@ -58,7 +58,9 @@ const LANE_SWAP_WARNING_BUBBLE_RADIUS = 17;
 const LANE_SWAP_WARNING_BUBBLE_ICON_SIZE = 30;
 const LANE_SWAP_WARNING_BUBBLE_OFFSET = 44;
 const LANE_SWAP_WARNING_BUBBLE_TRAVEL_MS = 320;
+const LANE_SWAP_INTRO_LEVEL_INDEX = 5;
 
+const CLAW_BREAKDOWN_INTRO_LEVEL_INDEX = 4;
 const CLAW_BREAKDOWN_HP_MIN = 4;
 const CLAW_BREAKDOWN_HP_MAX = 8;
 const CLAW_BREAKDOWN_DRAIN_MIN = 0.8;
@@ -575,7 +577,12 @@ export default class GameScene extends Phaser.Scene {
 
     this.levelMode = levelConfig?.mode || 'endless';
     this.levelName = levelConfig?.title || levelConfig?.id || 'Untitled Level';
-    this.clawBreakdownEnabled = this.levelId === DEBUG_LEVEL_ID && this.levelMode === 'endless';
+    const levelIndex = Number(levelConfig?.index);
+    const clawBreakdownCampaignEnabled = this.levelMode === 'campaign'
+      && Number.isFinite(levelIndex)
+      && levelIndex >= CLAW_BREAKDOWN_INTRO_LEVEL_INDEX;
+    const clawBreakdownEndlessEnabled = this.levelMode === 'endless';
+    this.clawBreakdownEnabled = clawBreakdownCampaignEnabled || clawBreakdownEndlessEnabled;
     this.clawBreakdownDebugTextEnabled = false;
     this.levelLayoutFamily = levelConfig?.layoutFamily || 'rotated_h';
     this.applyLayoutFamilyBehavior(this.levelLayoutFamily);
@@ -6618,7 +6625,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   isJamBeetleLevelEnabled() {
-    if (this.levelId === DEBUG_LEVEL_ID) {
+    if (this.levelMode === 'endless') {
       return true;
     }
 
@@ -6644,7 +6651,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   isDroneSabotageLevelEnabled() {
-    if (this.levelId === DEBUG_LEVEL_ID) {
+    if (this.levelMode === 'endless') {
       return true;
     }
 
@@ -7342,7 +7349,16 @@ export default class GameScene extends Phaser.Scene {
   }
 
   isLaneSwapIncidentEnabled() {
-    return this.levelId === DEBUG_LEVEL_ID && this.levelMode === 'endless';
+    if (this.levelMode === 'endless') {
+      return true;
+    }
+
+    if (this.levelMode !== 'campaign') {
+      return false;
+    }
+
+    const levelIndex = Number(this.levelConfig?.index);
+    return Number.isFinite(levelIndex) && levelIndex >= LANE_SWAP_INTRO_LEVEL_INDEX;
   }
 
   resetLaneSwapTimer(minMs = LANE_SWAP_MIN_COOLDOWN_MS, maxMs = LANE_SWAP_MAX_COOLDOWN_MS) {
