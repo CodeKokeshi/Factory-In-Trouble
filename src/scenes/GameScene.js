@@ -52,6 +52,10 @@ const DRONE_TUTORIAL_LOOP_DROP_FLY_MS = 620;
 const DRONE_TUTORIAL_LOOP_HOLD_MS = 880;
 const DRONE_TUTORIAL_BUTTON_LOCK_MS = 1000;
 const DRONE_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_drone_tutorial_disabled_v1';
+const JAM_BEETLE_TUTORIAL_BUTTON_LOCK_MS = 2000;
+const JAM_BEETLE_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_beetle_tutorial_disabled_v1';
+const CLAW_BREAKDOWN_TUTORIAL_BUTTON_LOCK_MS = 2000;
+const CLAW_BREAKDOWN_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_claw_breakdown_tutorial_disabled_v1';
 const TUTORIAL_RESET_HOTKEY_CODE = 221; // ]
 
 const LANE_SWAP_MIN_COOLDOWN_MS = 21000;
@@ -400,6 +404,14 @@ export default class GameScene extends Phaser.Scene {
     this.droneTutorialButtonUnlockEvent = null;
     this.droneTutorialPreferenceLoaded = false;
     this.droneTutorialDoNotShowAgain = false;
+    this.beetleTutorialShownThisRun = false;
+    this.beetleTutorialActive = false;
+    this.beetleTutorialOverlay = null;
+    this.beetleTutorialPreviewState = null;
+    this.beetleTutorialButtonUnlockEvent = null;
+    this.beetleTutorialPendingSpawnLaneId = null;
+    this.beetleTutorialPreferenceLoaded = false;
+    this.beetleTutorialDoNotShowAgain = false;
     this.tutorialResetHotkeyCode = TUTORIAL_RESET_HOTKEY_CODE;
 
     this.laneSwapActive = false;
@@ -417,6 +429,14 @@ export default class GameScene extends Phaser.Scene {
     this.clawBreakWarningText = null;
     this.clawBreakWarningSubText = null;
     this.clawBreakWarningTint = null;
+    this.clawBreakTutorialShownThisRun = false;
+    this.clawBreakTutorialActive = false;
+    this.clawBreakTutorialOverlay = null;
+    this.clawBreakTutorialPreviewState = null;
+    this.clawBreakTutorialButtonUnlockEvent = null;
+    this.clawBreakTutorialPreferenceLoaded = false;
+    this.clawBreakTutorialDoNotShowAgain = false;
+    this.clawBreakTutorialPendingLaneId = null;
 
     this.isGameOver = false;
     this.isPaused = false;
@@ -1017,6 +1037,7 @@ export default class GameScene extends Phaser.Scene {
   resetRunState() {
     this.cleanupDroneSabotage(true);
     this.cleanupDroneIncidentTutorial({ resumeGameplay: false });
+    this.cleanupBeetleTutorial({ resumeGameplay: false });
     this.cleanupLaneSwapIncident({ preserveTimer: true });
     this.cleanupClawBreakWarning();
 
@@ -1071,6 +1092,12 @@ export default class GameScene extends Phaser.Scene {
     this.clawBreakWarningText = null;
     this.clawBreakWarningSubText = null;
     this.clawBreakWarningTint = null;
+    this.clawBreakTutorialShownThisRun = false;
+    this.clawBreakTutorialActive = false;
+    this.clawBreakTutorialOverlay = null;
+    this.clawBreakTutorialPreviewState = null;
+    this.clawBreakTutorialButtonUnlockEvent = null;
+    this.clawBreakTutorialPendingLaneId = null;
 
     this.droneTutorialShownThisRun = false;
     this.droneTutorialActive = false;
@@ -1081,6 +1108,12 @@ export default class GameScene extends Phaser.Scene {
     this.droneTutorialLoopTweens = [];
     this.droneTutorialLoopToken = 0;
     this.droneTutorialButtonUnlockEvent = null;
+    this.beetleTutorialShownThisRun = false;
+    this.beetleTutorialActive = false;
+    this.beetleTutorialOverlay = null;
+    this.beetleTutorialPreviewState = null;
+    this.beetleTutorialButtonUnlockEvent = null;
+    this.beetleTutorialPendingSpawnLaneId = null;
 
     this.dragContext = null;
     this.simTimeScale = 1;
@@ -1434,6 +1467,7 @@ export default class GameScene extends Phaser.Scene {
     this.cleanupLaneSwapIncident({ preserveTimer: true });
     this.cleanupClawBreakWarning();
     this.cleanupDroneIncidentTutorial({ resumeGameplay: false });
+    this.cleanupBeetleTutorial({ resumeGameplay: false });
 
     this.isPaused = false;
     this.sceneTransitioning = false;
@@ -1485,9 +1519,17 @@ export default class GameScene extends Phaser.Scene {
 
   resetTutorialSuppressionFlags() {
     this.setDroneIncidentTutorialDisabled(false);
+    this.setJamBeetleTutorialDisabled(false);
+    this.setClawBreakdownTutorialDisabled(false);
     this.droneTutorialShownThisRun = false;
     this.droneTutorialPreferenceLoaded = true;
     this.droneTutorialDoNotShowAgain = false;
+    this.beetleTutorialShownThisRun = false;
+    this.beetleTutorialPreferenceLoaded = true;
+    this.beetleTutorialDoNotShowAgain = false;
+    this.clawBreakTutorialShownThisRun = false;
+    this.clawBreakTutorialPreferenceLoaded = true;
+    this.clawBreakTutorialDoNotShowAgain = false;
 
     this.emitFloatingText(640, 116, 'TUTORIALS RESET', '#bbf7d0', 24);
     this.playSfx('transfer', 0.9);
@@ -5077,6 +5119,11 @@ export default class GameScene extends Phaser.Scene {
     while (this.spawnTimerMs >= this.spawnIntervalMs && spawnSafety < 6) {
       spawnSafety += 1;
       const spawned = this.spawnFoodIfSpace();
+      if (this.isPaused) {
+        this.spawnTimerMs = Math.min(this.spawnTimerMs, this.spawnIntervalMs);
+        break;
+      }
+
       if (spawned) {
         this.spawnTimerMs -= this.spawnIntervalMs;
         continue;
@@ -6523,7 +6570,95 @@ export default class GameScene extends Phaser.Scene {
     this.refreshLaneClawBreakdownVisual(lane);
   }
 
-  cleanupClawBreakWarning() {
+  shouldShowClawBreakdownTutorial() {
+    this.loadClawBreakdownTutorialPreference();
+    if (this.clawBreakTutorialDoNotShowAgain) {
+      return false;
+    }
+
+    if (this.clawBreakTutorialShownThisRun || this.clawBreakTutorialActive) {
+      return false;
+    }
+
+    if (this.levelMode === 'endless') {
+      return true;
+    }
+
+    if (this.levelMode !== 'campaign') {
+      return false;
+    }
+
+    const levelIndex = Number(this.levelConfig?.index);
+    return Number.isFinite(levelIndex) && levelIndex >= CLAW_BREAKDOWN_INTRO_LEVEL_INDEX;
+  }
+
+  loadClawBreakdownTutorialPreference() {
+    if (this.clawBreakTutorialPreferenceLoaded) {
+      return;
+    }
+
+    this.clawBreakTutorialPreferenceLoaded = true;
+    this.clawBreakTutorialDoNotShowAgain = false;
+
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(CLAW_BREAKDOWN_TUTORIAL_DISABLE_STORAGE_KEY);
+      this.clawBreakTutorialDoNotShowAgain = raw === '1' || raw === 'true';
+    } catch {
+      this.clawBreakTutorialDoNotShowAgain = false;
+    }
+  }
+
+  setClawBreakdownTutorialDisabled(disabled) {
+    this.clawBreakTutorialPreferenceLoaded = true;
+    this.clawBreakTutorialDoNotShowAgain = disabled === true;
+
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    try {
+      if (this.clawBreakTutorialDoNotShowAgain) {
+        window.localStorage.setItem(CLAW_BREAKDOWN_TUTORIAL_DISABLE_STORAGE_KEY, '1');
+      } else {
+        window.localStorage.removeItem(CLAW_BREAKDOWN_TUTORIAL_DISABLE_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage write failures.
+    }
+  }
+
+  cleanupClawBreakWarning({ resumeGameplay = false } = {}) {
+    const wasActive = this.clawBreakTutorialActive;
+
+    if (this.clawBreakTutorialButtonUnlockEvent) {
+      this.clawBreakTutorialButtonUnlockEvent.remove(false);
+      this.clawBreakTutorialButtonUnlockEvent = null;
+    }
+
+    if (this.clawBreakTutorialPreviewState) {
+      const { animatedTargets = [], animatedTweens = [] } = this.clawBreakTutorialPreviewState;
+      animatedTweens.forEach((tween) => {
+        tween?.remove?.();
+      });
+
+      if (animatedTargets.length > 0) {
+        this.tweens.killTweensOf(animatedTargets);
+      }
+    }
+    this.clawBreakTutorialPreviewState = null;
+
+    if (this.clawBreakTutorialOverlay?.active) {
+      this.tweens.killTweensOf(this.clawBreakTutorialOverlay);
+      this.clawBreakTutorialOverlay.destroy(true);
+    }
+    this.clawBreakTutorialOverlay = null;
+    this.clawBreakTutorialActive = false;
+    this.clawBreakTutorialPendingLaneId = null;
+
     if (this.clawBreakWarningText?.active) {
       this.tweens.killTweensOf(this.clawBreakWarningText);
       this.clawBreakWarningText.destroy();
@@ -6541,100 +6676,512 @@ export default class GameScene extends Phaser.Scene {
       this.clawBreakWarningTint.destroy();
     }
     this.clawBreakWarningTint = null;
+
+    if (wasActive) {
+      this.pauseTransitionLock = false;
+    }
+
+    if (
+      resumeGameplay
+      && !this.isGameOver
+      && !this.levelComplete
+      && !this.sceneTransitioning
+      && !this.isDraftActive
+      && !this.levelIntroActive
+      && !this.droneTutorialActive
+      && !this.beetleTutorialActive
+      && !this.laneSwapActive
+    ) {
+      this.isPaused = false;
+    }
   }
 
   showClawBreakdownWarning(lane) {
-    this.cleanupClawBreakWarning();
+    this.startClawBreakdownTutorial(lane);
+  }
 
-    const camera = this.cameras.main;
-    const centerX = camera?.centerX ?? 640;
-    const centerY = camera?.centerY ?? 360;
+  startClawBreakdownTutorial(lane) {
+    if (this.clawBreakTutorialActive || !this.shouldShowClawBreakdownTutorial()) {
+      return false;
+    }
+
+    if (
+      this.sceneTransitioning
+      || this.isGameOver
+      || this.levelComplete
+      || this.levelIntroActive
+      || this.isDraftActive
+      || this.droneActive
+      || this.droneTutorialActive
+      || this.beetleTutorialActive
+      || this.laneSwapActive
+    ) {
+      return false;
+    }
+
+    this.clawBreakTutorialShownThisRun = true;
+    this.clawBreakTutorialActive = true;
+    this.clawBreakTutorialPendingLaneId = lane?.id ?? null;
+
+    this.abortActiveDrag();
+    this.isPaused = true;
+    this.pauseTransitionLock = true;
+
+    const overlay = this.add.container(0, 0).setDepth(368);
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x0b1220, 0.72).setInteractive();
+    scrim.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+    });
+
+    const softBlurLayer = this.add
+      .rectangle(640, 360, 1280, 720, 0xe2e8f0, 0.05)
+      .setBlendMode(Phaser.BlendModes.SCREEN);
+
+    const panelX = 640;
+    const panelY = 362;
+    const panelWidth = 892;
+    const panelHeight = 562;
+
     const laneLabel = String(lane?.id || 'lane').replace(/_/g, ' ').toUpperCase();
+    const panelShadow = this.add.rectangle(panelX, panelY + 9, panelWidth, panelHeight, 0x020617, 0.56);
+    const panel = this.add
+      .rectangle(panelX, panelY, panelWidth, panelHeight, 0x4a2012, 0.97)
+      .setStrokeStyle(2, 0xf0bd85, 0.95);
+    const panelTopStrip = this.add.rectangle(panelX, panelY - 236, panelWidth - 74, 40, 0xffffff, 0.14);
 
-    const warningText = this.add
-      .text(centerX, centerY - 16, `${laneLabel} CLAW DAMAGED`, {
+    const title = this.add
+      .text(panelX, panelY - 234, 'CLAW OVERHEAT ALERT', {
         fontFamily: GAME_DISPLAY_FONT,
-        fontSize: '40px',
-        color: '#fef2f2',
-        stroke: '#450a0a',
-        strokeThickness: 6,
+        fontSize: '44px',
+        color: '#fff1e6',
         align: 'center'
       })
       .setOrigin(0.5)
-      .setDepth(332)
-      .setAlpha(0);
+      .setLetterSpacing(1.2)
+      .setShadow(0, 3, '#000000', 8);
 
-    const warningSubText = this.add
-      .text(centerX, centerY + 36, 'DRONE REPAIR IN PROGRESS', {
+    const laneCaption = this.add
+      .text(panelX, panelY - 198, `${laneLabel} just broke down.`, {
         fontFamily: GAME_UI_FONT,
-        fontSize: '25px',
-        color: '#bae6fd',
-        stroke: '#082f49',
-        strokeThickness: 4,
+        fontSize: '24px',
+        color: '#fde68a',
         align: 'center'
       })
       .setOrigin(0.5)
-      .setDepth(332)
-      .setAlpha(0);
+      .setShadow(0, 2, '#000000', 6);
 
-    const warningTint = this.add
-      .rectangle(centerX, centerY, camera?.width ?? 1280, camera?.height ?? 720, 0x991b1b, 1)
-      .setDepth(249)
-      .setAlpha(0);
+    const previewY = 308;
+    const previewShadow = this.add.rectangle(640, previewY + 6, 760, 176, 0x020617, 0.48);
+    const previewFrame = this.add
+      .rectangle(640, previewY, 760, 176, 0x1f2937, 0.94)
+      .setStrokeStyle(2, 0xf0bd85, 0.72);
 
-    this.clawBreakWarningText = warningText;
-    this.clawBreakWarningSubText = warningSubText;
-    this.clawBreakWarningTint = warningTint;
+    const previewContainer = this.add.container(640, previewY).setDepth(372);
+    const belt = this.add.rectangle(0, 18, 706, 36, 0x3f3f46, 0.98).setStrokeStyle(2, 0x0f172a, 0.7);
+    const stripes = [];
+    for (let stripeX = -334; stripeX <= 334; stripeX += 48) {
+      stripes.push(this.add.rectangle(stripeX, 18, 24, 4, 0xa1a1aa, 0.34));
+    }
 
-    const fadeInMs = 180;
-    const fadeOutMs = 250;
-    const holdMs = Math.max(0, CLAW_BREAKDOWN_WARNING_DURATION_MS - fadeInMs - fadeOutMs);
+    const stageX = {
+      normal: -236,
+      overheated: 0,
+      repairing: 236
+    };
 
-    this.tweens.add({
-      targets: [warningText, warningSubText],
-      alpha: 0.95,
-      duration: fadeInMs,
-      ease: 'Sine.Out'
+    const createPreviewClaw = (x, { baseColor, armColor, jawColor, alpha = 1 }) => {
+      const clawContainer = this.add.container(x, 10).setAlpha(alpha);
+      const clawGraphics = this.add.graphics();
+      clawGraphics.lineStyle(4, armColor, 1);
+      clawGraphics.lineBetween(0, 0, -24, 0);
+      clawGraphics.lineStyle(4, jawColor, 1);
+      clawGraphics.lineBetween(-24, 0, -38, -10);
+      clawGraphics.lineBetween(-24, 0, -38, 10);
+      const clawBase = this.add.circle(0, 0, 10, baseColor, 1).setStrokeStyle(2, 0x0f172a, 0.95);
+      clawContainer.add([clawGraphics, clawBase]);
+      return { container: clawContainer, graphics: clawGraphics, base: clawBase };
+    };
+
+    const normalClaw = createPreviewClaw(stageX.normal, {
+      baseColor: 0x34d399,
+      armColor: 0xfef3c7,
+      jawColor: 0x22c55e,
+      alpha: 1
     });
-
-    this.tweens.add({
-      targets: warningTint,
-      alpha: 0.1,
-      duration: fadeInMs,
-      ease: 'Sine.Out'
+    const overheatedClaw = createPreviewClaw(stageX.overheated, {
+      baseColor: 0xf97316,
+      armColor: 0xfdba74,
+      jawColor: 0xea580c,
+      alpha: 0.58
     });
+    overheatedClaw.container.setAngle(8);
 
-    this.time.delayedCall(fadeInMs + holdMs, () => {
-      this.tweens.add({
-        targets: [warningText, warningSubText],
-        alpha: 0,
-        duration: fadeOutMs,
-        ease: 'Sine.In',
-        onComplete: () => {
-          if (this.clawBreakWarningText === warningText) {
-            this.clawBreakWarningText = null;
-          }
-          if (this.clawBreakWarningSubText === warningSubText) {
-            this.clawBreakWarningSubText = null;
-          }
-          warningText.destroy();
-          warningSubText.destroy();
-        }
+    const repairingClaw = createPreviewClaw(stageX.repairing, {
+      baseColor: 0x38bdf8,
+      armColor: 0xdbeafe,
+      jawColor: 0x0ea5e9,
+      alpha: 0.9
+    });
+    repairingClaw.container.setAngle(-4);
+
+    const smokeOne = this.add.circle(stageX.overheated - 12, -38, 8, 0xcbd5e1, 0.48);
+    const smokeTwo = this.add.circle(stageX.overheated + 2, -48, 6, 0xe2e8f0, 0.42);
+    const smokeThree = this.add.circle(stageX.overheated + 14, -36, 7, 0x94a3b8, 0.38);
+
+    const repairDrone = this.add.container(stageX.repairing + 56, -24);
+    const droneShadow = this.add.ellipse(0, 13, 34, 11, 0x020617, 0.24);
+    const droneBody = this.add.rectangle(0, 0, 26, 14, 0x475569, 1).setStrokeStyle(2, 0x93c5fd, 0.95);
+    const droneLight = this.add.rectangle(0, 0, 8, 4, 0x22d3ee, 0.9);
+    const droneRotor = this.add.container(0, -10);
+    const droneBladeA = this.add.rectangle(0, 0, 24, 2, 0xe2e8f0, 0.95);
+    const droneBladeB = this.add.rectangle(0, 0, 24, 2, 0xe2e8f0, 0.95).setAngle(90);
+    droneRotor.add([droneBladeA, droneBladeB]);
+    repairDrone.add([droneShadow, droneBody, droneLight, droneRotor]);
+
+    const normalLabel = this.add
+      .text(stageX.normal, -68, 'WORKING', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#bbf7d0'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+    const overheatedLabel = this.add
+      .text(stageX.overheated, -68, 'OVERHEATED', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#fdba74'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+    const repairLabel = this.add
+      .text(stageX.repairing, -68, 'REPAIRING', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#93c5fd'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+
+    const arrowOne = this.add
+      .text(-118, 10, '>', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '44px',
+        color: '#fdba74'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+    const arrowTwo = this.add
+      .text(118, 10, '>', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '44px',
+        color: '#93c5fd'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+
+    previewContainer.add([
+      belt,
+      ...stripes,
+      normalClaw.container,
+      overheatedClaw.container,
+      repairingClaw.container,
+      smokeOne,
+      smokeTwo,
+      smokeThree,
+      repairDrone,
+      normalLabel,
+      overheatedLabel,
+      repairLabel,
+      arrowOne,
+      arrowTwo
+    ]);
+
+    const layoutInlineTexts = (parts, centerX, y) => {
+      const totalWidth = parts.reduce((sum, part) => sum + part.width, 0);
+      let cursor = centerX - totalWidth * 0.5;
+      parts.forEach((part) => {
+        part.setOrigin(0, 0.5);
+        part.setPosition(cursor, y);
+        cursor += part.width;
       });
+    };
 
-      this.tweens.add({
-        targets: warningTint,
-        alpha: 0,
-        duration: fadeOutMs,
-        ease: 'Sine.In',
-        onComplete: () => {
-          if (this.clawBreakWarningTint === warningTint) {
-            this.clawBreakWarningTint = null;
-          }
-          warningTint.destroy();
-        }
-      });
+    const lineOnePrefix = this.add.text(0, 0, 'CLAWS will ', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '30px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    const overheatWord = this.add.text(0, 0, 'OVERHEAT', {
+      fontFamily: GAME_DISPLAY_FONT,
+      fontSize: '34px',
+      color: '#fb923c'
+    }).setShadow(0, 2, '#000000', 5);
+    const lineOneSuffix = this.add.text(0, 0, ' and smoke up.', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '30px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    layoutInlineTexts([lineOnePrefix, overheatWord, lineOneSuffix], 640, 444);
+
+    const lineTwoPrefix = this.add.text(0, 0, 'Repair drones will come and ', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '28px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    const fixWord = this.add.text(0, 0, 'FIX', {
+      fontFamily: GAME_DISPLAY_FONT,
+      fontSize: '34px',
+      color: '#4ade80'
+    }).setShadow(0, 2, '#000000', 5);
+    const lineTwoSuffix = this.add.text(0, 0, ' after a short time.', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '28px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    layoutInlineTexts([lineTwoPrefix, fixWord, lineTwoSuffix], 640, 480);
+
+    const stripeTween = this.tweens.add({
+      targets: stripes,
+      x: '+=22',
+      duration: 360,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
     });
+    const normalPulseTween = this.tweens.add({
+      targets: normalClaw.container,
+      scaleX: 1.07,
+      scaleY: 1.07,
+      duration: 430,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const overheatWobbleTween = this.tweens.add({
+      targets: overheatedClaw.container,
+      angle: 16,
+      duration: 250,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const smokeOneTween = this.tweens.add({
+      targets: smokeOne,
+      y: smokeOne.y - 10,
+      alpha: 0.16,
+      scaleX: 1.24,
+      scaleY: 1.24,
+      duration: 760,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const smokeTwoTween = this.tweens.add({
+      targets: smokeTwo,
+      y: smokeTwo.y - 12,
+      alpha: 0.12,
+      scaleX: 1.28,
+      scaleY: 1.28,
+      duration: 720,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const smokeThreeTween = this.tweens.add({
+      targets: smokeThree,
+      y: smokeThree.y - 8,
+      alpha: 0.14,
+      scaleX: 1.22,
+      scaleY: 1.22,
+      duration: 700,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const droneRotorTween = this.tweens.add({
+      targets: droneRotor,
+      angle: 360,
+      duration: 130,
+      repeat: -1,
+      ease: 'Linear'
+    });
+    const droneHoverTween = this.tweens.add({
+      targets: repairDrone,
+      y: repairDrone.y - 3,
+      duration: 390,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const droneAssistTween = this.tweens.add({
+      targets: repairDrone,
+      x: repairDrone.x - 18,
+      duration: 520,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const repairPulseTween = this.tweens.add({
+      targets: repairingClaw.container,
+      alpha: 0.62,
+      duration: 340,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const overheatWordTween = this.tweens.add({
+      targets: overheatWord,
+      scaleX: 1.08,
+      scaleY: 1.08,
+      duration: 260,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const fixWordTween = this.tweens.add({
+      targets: fixWord,
+      scaleX: 1.08,
+      scaleY: 1.08,
+      duration: 320,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+
+    let doNotShowAgain = false;
+    const checkboxContainer = this.add.container(640, 532).setDepth(374);
+    const checkboxBody = this.add.rectangle(-96, 0, 22, 22, 0x0f172a, 0.95).setStrokeStyle(2, 0x94a3b8, 0.95);
+    const checkboxFill = this.add.rectangle(-96, 0, 12, 12, 0x86efac, 1).setVisible(false);
+    const checkboxLabel = this.add
+      .text(16, 0, 'Do not show again', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#dbeafe',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 3);
+    const checkboxHit = this.add.zone(0, 0, 300, 34).setInteractive({ useHandCursor: true });
+
+    const syncCheckboxVisual = () => {
+      checkboxFill.setVisible(doNotShowAgain);
+      checkboxBody.setStrokeStyle(2, doNotShowAgain ? 0x86efac : 0x94a3b8, 0.95);
+      checkboxLabel.setColor(doNotShowAgain ? '#bbf7d0' : '#dbeafe');
+    };
+
+    checkboxHit.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+      doNotShowAgain = !doNotShowAgain;
+      syncCheckboxVisual();
+    });
+
+    checkboxContainer.add([checkboxBody, checkboxFill, checkboxLabel, checkboxHit]);
+    syncCheckboxVisual();
+
+    const disabledButtonStyle = {
+      bodyColor: 0x6b7280,
+      bodyHoverColor: 0x6b7280,
+      glossAlpha: 0.08,
+      textColor: '#e5e7eb',
+      textShadowColor: '#1f2937'
+    };
+    const enabledButtonStyle = {
+      bodyColor: 0x16a34a,
+      bodyHoverColor: 0x22c55e,
+      glossAlpha: 0.14,
+      textColor: '#f0fdf4',
+      textShadowColor: '#064e3b'
+    };
+
+    const acknowledgeTutorial = () => {
+      this.setClawBreakdownTutorialDisabled(doNotShowAgain);
+      this.pauseTransitionLock = false;
+      this.cleanupClawBreakWarning({ resumeGameplay: true });
+    };
+
+    overlay.add([
+      scrim,
+      softBlurLayer,
+      panelShadow,
+      panel,
+      panelTopStrip,
+      title,
+      laneCaption,
+      previewShadow,
+      previewFrame,
+      previewContainer,
+      lineOnePrefix,
+      overheatWord,
+      lineOneSuffix,
+      lineTwoPrefix,
+      fixWord,
+      lineTwoSuffix,
+      checkboxContainer
+    ]);
+
+    let understoodButton = this.createPauseMenuEntry(
+      overlay,
+      'Understood',
+      596,
+      0x9ca3af,
+      acknowledgeTutorial,
+      disabledButtonStyle
+    );
+
+    this.clawBreakTutorialButtonUnlockEvent = this.time.delayedCall(CLAW_BREAKDOWN_TUTORIAL_BUTTON_LOCK_MS, () => {
+      this.clawBreakTutorialButtonUnlockEvent = null;
+      if (!this.clawBreakTutorialActive || this.clawBreakTutorialOverlay !== overlay || !overlay.active) {
+        return;
+      }
+
+      if (understoodButton?.active) {
+        understoodButton.destroy(true);
+      }
+
+      this.pauseTransitionLock = false;
+      understoodButton = this.createPauseMenuEntry(
+        overlay,
+        'Understood',
+        596,
+        0x86efac,
+        acknowledgeTutorial,
+        enabledButtonStyle
+      );
+    });
+
+    this.clawBreakTutorialOverlay = overlay;
+    this.clawBreakTutorialPreviewState = {
+      animatedTargets: [
+        ...stripes,
+        normalClaw.container,
+        overheatedClaw.container,
+        repairingClaw.container,
+        smokeOne,
+        smokeTwo,
+        smokeThree,
+        repairDrone,
+        droneRotor,
+        overheatWord,
+        fixWord
+      ],
+      animatedTweens: [
+        stripeTween,
+        normalPulseTween,
+        overheatWobbleTween,
+        smokeOneTween,
+        smokeTwoTween,
+        smokeThreeTween,
+        droneRotorTween,
+        droneHoverTween,
+        droneAssistTween,
+        repairPulseTween,
+        overheatWordTween,
+        fixWordTween
+      ]
+    };
+
+    return true;
   }
 
   triggerLaneClawOverheat(lane) {
@@ -6938,6 +7485,414 @@ export default class GameScene extends Phaser.Scene {
     const baseSpawnChance = 1 / (totalCoreFoodCategories + 1);
     const tunedSpawnChance = Phaser.Math.Clamp(baseSpawnChance * JAM_BEETLE_SPAWN_SCALE, 0.01, 0.95);
     return Math.random() < tunedSpawnChance;
+  }
+
+  shouldShowJamBeetleTutorial() {
+    this.loadJamBeetleTutorialPreference();
+    if (this.beetleTutorialDoNotShowAgain) {
+      return false;
+    }
+
+    if (this.beetleTutorialShownThisRun || this.beetleTutorialActive) {
+      return false;
+    }
+
+    return this.isJamBeetleLevelEnabled();
+  }
+
+  loadJamBeetleTutorialPreference() {
+    if (this.beetleTutorialPreferenceLoaded) {
+      return;
+    }
+
+    this.beetleTutorialPreferenceLoaded = true;
+    this.beetleTutorialDoNotShowAgain = false;
+
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(JAM_BEETLE_TUTORIAL_DISABLE_STORAGE_KEY);
+      this.beetleTutorialDoNotShowAgain = raw === '1' || raw === 'true';
+    } catch {
+      this.beetleTutorialDoNotShowAgain = false;
+    }
+  }
+
+  setJamBeetleTutorialDisabled(disabled) {
+    this.beetleTutorialPreferenceLoaded = true;
+    this.beetleTutorialDoNotShowAgain = disabled === true;
+
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    try {
+      if (this.beetleTutorialDoNotShowAgain) {
+        window.localStorage.setItem(JAM_BEETLE_TUTORIAL_DISABLE_STORAGE_KEY, '1');
+      } else {
+        window.localStorage.removeItem(JAM_BEETLE_TUTORIAL_DISABLE_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage write failures.
+    }
+  }
+
+  cleanupBeetleTutorial({ resumeGameplay = false } = {}) {
+    const wasActive = this.beetleTutorialActive;
+
+    if (this.beetleTutorialButtonUnlockEvent) {
+      this.beetleTutorialButtonUnlockEvent.remove(false);
+      this.beetleTutorialButtonUnlockEvent = null;
+    }
+
+    if (this.beetleTutorialPreviewState) {
+      const { animatedTargets = [], animatedTweens = [] } = this.beetleTutorialPreviewState;
+      animatedTweens.forEach((tween) => {
+        tween?.remove?.();
+      });
+
+      if (animatedTargets.length > 0) {
+        this.tweens.killTweensOf(animatedTargets);
+      }
+    }
+    this.beetleTutorialPreviewState = null;
+
+    if (this.beetleTutorialOverlay?.active) {
+      this.tweens.killTweensOf(this.beetleTutorialOverlay);
+      this.beetleTutorialOverlay.destroy(true);
+    }
+
+    this.beetleTutorialOverlay = null;
+    this.beetleTutorialPendingSpawnLaneId = null;
+    this.beetleTutorialActive = false;
+
+    if (wasActive) {
+      this.pauseTransitionLock = false;
+    }
+
+    if (
+      resumeGameplay
+      && !this.isGameOver
+      && !this.levelComplete
+      && !this.sceneTransitioning
+      && !this.isDraftActive
+      && !this.levelIntroActive
+      && !this.droneTutorialActive
+      && !this.laneSwapActive
+    ) {
+      this.isPaused = false;
+    }
+  }
+
+  startJamBeetleSpawnTutorial(spawnLaneId = null) {
+    if (this.beetleTutorialActive || !this.shouldShowJamBeetleTutorial()) {
+      return false;
+    }
+
+    if (
+      this.sceneTransitioning
+      || this.isGameOver
+      || this.levelComplete
+      || this.levelIntroActive
+      || this.isDraftActive
+      || this.droneTutorialActive
+      || this.laneSwapActive
+    ) {
+      return false;
+    }
+
+    this.beetleTutorialShownThisRun = true;
+    this.beetleTutorialActive = true;
+    this.beetleTutorialPendingSpawnLaneId = spawnLaneId;
+
+    this.abortActiveDrag();
+    this.isPaused = true;
+    this.pauseTransitionLock = true;
+
+    const overlay = this.add.container(0, 0).setDepth(368);
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x0b1220, 0.72).setInteractive();
+    scrim.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+    });
+
+    const softBlurLayer = this.add
+      .rectangle(640, 360, 1280, 720, 0xe2e8f0, 0.05)
+      .setBlendMode(Phaser.BlendModes.SCREEN);
+
+    const panelX = 640;
+    const panelY = 362;
+    const panelWidth = 892;
+    const panelHeight = 506;
+
+    const panelShadow = this.add.rectangle(panelX, panelY + 9, panelWidth, panelHeight, 0x020617, 0.56);
+    const panel = this.add
+      .rectangle(panelX, panelY, panelWidth, panelHeight, 0x4a2012, 0.97)
+      .setStrokeStyle(2, 0xf0bd85, 0.95);
+    const panelTopStrip = this.add.rectangle(panelX, panelY - 206, panelWidth - 74, 40, 0xffffff, 0.14);
+
+    const title = this.add
+      .text(panelX, panelY - 206, 'BEWARE OF BUGS', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '48px',
+        color: '#fff1e6',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(1.2)
+      .setShadow(0, 3, '#000000', 8);
+
+    const previewY = 296;
+    const previewShadow = this.add.rectangle(640, previewY + 6, 760, 156, 0x020617, 0.48);
+    const previewFrame = this.add
+      .rectangle(640, previewY, 760, 156, 0x1f2937, 0.94)
+      .setStrokeStyle(2, 0xf0bd85, 0.72);
+
+    const previewContainer = this.add.container(640, previewY).setDepth(372);
+    const belt = this.add.rectangle(0, 12, 686, 34, 0x3f3f46, 0.98).setStrokeStyle(2, 0x0f172a, 0.7);
+    const stripes = [];
+    for (let stripeX = -320; stripeX <= 320; stripeX += 46) {
+      stripes.push(this.add.rectangle(stripeX, 12, 22, 4, 0xa1a1aa, 0.34));
+    }
+
+    const beetleTextureKey = this.jamBeetleTextureKeys[0] || null;
+    let beetleVisual;
+    if (beetleTextureKey && this.textures.exists(beetleTextureKey)) {
+      beetleVisual = this.add.sprite(-238, 6, beetleTextureKey);
+      const maxDim = Math.max(beetleVisual.width || 1, beetleVisual.height || 1);
+      beetleVisual.setScale(84 / maxDim);
+      if (this.anims.exists(JAM_BEETLE_ANIM_KEY)) {
+        beetleVisual.play(JAM_BEETLE_ANIM_KEY);
+      }
+    } else {
+      beetleVisual = this.add.circle(-238, 6, 32, JAM_BEETLE_COLOR, 1).setStrokeStyle(3, 0x3a1013, 1);
+    }
+
+    const warningLine = this.add
+      .text(-152, 6, 'Beetles will appear and jam the belts.', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '30px',
+        color: '#fee2e2',
+        align: 'left'
+      })
+      .setOrigin(0, 0.5)
+      .setShadow(0, 2, '#000000', 6);
+
+    previewContainer.add([belt, ...stripes, beetleVisual, warningLine]);
+
+    const layoutInlineTexts = (parts, centerX, y) => {
+      const totalWidth = parts.reduce((sum, part) => sum + part.width, 0);
+      let cursor = centerX - totalWidth * 0.5;
+      parts.forEach((part) => {
+        part.setOrigin(0, 0.5);
+        part.setPosition(cursor, y);
+        cursor += part.width;
+      });
+    };
+
+    const tapWord = this.add.text(0, 0, 'TAP', {
+      fontFamily: GAME_DISPLAY_FONT,
+      fontSize: '36px',
+      color: '#facc15'
+    }).setShadow(0, 2, '#000000', 5);
+    const lineOneMid = this.add.text(0, 0, ' them to ', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '31px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    const splatWord = this.add.text(0, 0, 'SPLAT', {
+      fontFamily: GAME_DISPLAY_FONT,
+      fontSize: '36px',
+      color: '#fb7185'
+    }).setShadow(0, 2, '#000000', 5);
+    layoutInlineTexts([tapWord, lineOneMid, splatWord], 640, 404);
+
+    const lineTwoPrefix = this.add.text(0, 0, 'or ', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '30px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    const dragWord = this.add.text(0, 0, 'DRAG', {
+      fontFamily: GAME_DISPLAY_FONT,
+      fontSize: '34px',
+      color: '#7dd3fc'
+    }).setShadow(0, 2, '#000000', 5);
+    const lineTwoMid = this.add.text(0, 0, ' them away from the belts to ', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '30px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    const flickWord = this.add.text(0, 0, 'FLICK', {
+      fontFamily: GAME_DISPLAY_FONT,
+      fontSize: '34px',
+      color: '#fb923c'
+    }).setShadow(0, 2, '#000000', 5);
+    const lineTwoSuffix = this.add.text(0, 0, ' them.', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '30px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    layoutInlineTexts([lineTwoPrefix, dragWord, lineTwoMid, flickWord, lineTwoSuffix], 640, 440);
+
+    const beetleHoverTween = this.tweens.add({
+      targets: beetleVisual,
+      y: beetleVisual.y - 5,
+      duration: 620,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const tapPulseTween = this.tweens.add({
+      targets: tapWord,
+      scaleX: 1.15,
+      scaleY: 1.15,
+      duration: 190,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const dragFloatTween = this.tweens.add({
+      targets: dragWord,
+      x: dragWord.x + 5,
+      duration: 580,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const flickPulseTween = this.tweens.add({
+      targets: flickWord,
+      scaleX: 1.08,
+      scaleY: 1.08,
+      duration: 320,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+
+    let doNotShowAgain = false;
+    const checkboxContainer = this.add.container(640, 496).setDepth(374);
+    const checkboxBody = this.add.rectangle(-96, 0, 22, 22, 0x0f172a, 0.95).setStrokeStyle(2, 0x94a3b8, 0.95);
+    const checkboxFill = this.add.rectangle(-96, 0, 12, 12, 0x86efac, 1).setVisible(false);
+    const checkboxLabel = this.add
+      .text(16, 0, 'Do not show again', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#dbeafe',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 3);
+    const checkboxHit = this.add.zone(0, 0, 300, 34).setInteractive({ useHandCursor: true });
+
+    const syncCheckboxVisual = () => {
+      checkboxFill.setVisible(doNotShowAgain);
+      checkboxBody.setStrokeStyle(2, doNotShowAgain ? 0x86efac : 0x94a3b8, 0.95);
+      checkboxLabel.setColor(doNotShowAgain ? '#bbf7d0' : '#dbeafe');
+    };
+
+    checkboxHit.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+      doNotShowAgain = !doNotShowAgain;
+      syncCheckboxVisual();
+    });
+
+    checkboxContainer.add([checkboxBody, checkboxFill, checkboxLabel, checkboxHit]);
+    syncCheckboxVisual();
+
+    const disabledButtonStyle = {
+      bodyColor: 0x6b7280,
+      bodyHoverColor: 0x6b7280,
+      glossAlpha: 0.08,
+      textColor: '#e5e7eb',
+      textShadowColor: '#1f2937'
+    };
+    const enabledButtonStyle = {
+      bodyColor: 0x16a34a,
+      bodyHoverColor: 0x22c55e,
+      glossAlpha: 0.14,
+      textColor: '#f0fdf4',
+      textShadowColor: '#064e3b'
+    };
+
+    const acknowledgeTutorial = () => {
+      this.setJamBeetleTutorialDisabled(doNotShowAgain);
+      this.pauseTransitionLock = false;
+      this.acknowledgeJamBeetleTutorial();
+    };
+
+    overlay.add([
+      scrim,
+      softBlurLayer,
+      panelShadow,
+      panel,
+      panelTopStrip,
+      title,
+      previewShadow,
+      previewFrame,
+      previewContainer,
+      tapWord,
+      lineOneMid,
+      splatWord,
+      lineTwoPrefix,
+      dragWord,
+      lineTwoMid,
+      flickWord,
+      lineTwoSuffix,
+      checkboxContainer
+    ]);
+
+    let understoodButton = this.createPauseMenuEntry(
+      overlay,
+      'Understood',
+      562,
+      0x9ca3af,
+      acknowledgeTutorial,
+      disabledButtonStyle
+    );
+
+    this.beetleTutorialButtonUnlockEvent = this.time.delayedCall(JAM_BEETLE_TUTORIAL_BUTTON_LOCK_MS, () => {
+      this.beetleTutorialButtonUnlockEvent = null;
+      if (!this.beetleTutorialActive || this.beetleTutorialOverlay !== overlay || !overlay.active) {
+        return;
+      }
+
+      if (understoodButton?.active) {
+        understoodButton.destroy(true);
+      }
+
+      this.pauseTransitionLock = false;
+      understoodButton = this.createPauseMenuEntry(
+        overlay,
+        'Understood',
+        562,
+        0x86efac,
+        acknowledgeTutorial,
+        enabledButtonStyle
+      );
+    });
+
+    this.beetleTutorialOverlay = overlay;
+    this.beetleTutorialPreviewState = {
+      animatedTargets: [beetleVisual, tapWord, dragWord, flickWord],
+      animatedTweens: [beetleHoverTween, tapPulseTween, dragFloatTween, flickPulseTween]
+    };
+
+    return true;
+  }
+
+  acknowledgeJamBeetleTutorial() {
+    const pendingSpawnLaneId = this.beetleTutorialPendingSpawnLaneId;
+    this.cleanupBeetleTutorial({ resumeGameplay: true });
+
+    if (this.sceneTransitioning || this.isGameOver || this.levelComplete) {
+      return;
+    }
+
+    this.spawnFood(pendingSpawnLaneId, {
+      forceJamBeetle: true,
+      skipJamBeetleTutorialCheck: true
+    });
   }
 
   isDroneSabotageLevelEnabled() {
@@ -8876,8 +9831,12 @@ export default class GameScene extends Phaser.Scene {
       }
 
       const laneId = Phaser.Utils.Array.GetRandom(enterableLaneIds);
-      this.spawnFood(laneId);
-      return true;
+      const spawned = this.spawnFood(laneId);
+      if (spawned === false && this.beetleTutorialActive) {
+        return true;
+      }
+
+      return spawned !== false;
     }
 
     const closestToEntry = this.getClosestMainPosToEntry();
@@ -8885,13 +9844,28 @@ export default class GameScene extends Phaser.Scene {
       return false;
     }
 
-    this.spawnFood();
-    return true;
+    const spawned = this.spawnFood();
+    if (spawned === false && this.beetleTutorialActive) {
+      return true;
+    }
+
+    return spawned !== false;
   }
 
-  spawnFood(spawnLaneId = null) {
+  spawnFood(spawnLaneId = null, options = {}) {
+    const forceJamBeetle = options?.forceJamBeetle === true;
+    const skipJamBeetleTutorialCheck = options?.skipJamBeetleTutorialCheck === true;
+
     const foodPool = this.activeFoodTypes?.length > 0 ? this.activeFoodTypes : FOOD_TYPES;
-    const spawnJamBeetle = this.shouldSpawnJamBeetle();
+    const spawnJamBeetle = forceJamBeetle || this.shouldSpawnJamBeetle();
+
+    if (spawnJamBeetle && !forceJamBeetle && !skipJamBeetleTutorialCheck) {
+      const tutorialStarted = this.startJamBeetleSpawnTutorial(spawnLaneId);
+      if (tutorialStarted) {
+        return false;
+      }
+    }
+
     const food = spawnJamBeetle ? null : Phaser.Utils.Array.GetRandom(foodPool);
     const itemId = this.nextItemId;
     const spawnLane = spawnLaneId ? this.lanesById[spawnLaneId] : null;
@@ -9016,6 +9990,7 @@ export default class GameScene extends Phaser.Scene {
     this.emitTransferParticles(spawnX, spawnY, itemColor, 6);
 
     this.nextItemId += 1;
+    return true;
   }
 
   setupGrabControls() {
