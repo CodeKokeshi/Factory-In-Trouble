@@ -41,6 +41,15 @@ const DRONE_FLIGHT_MAX_DURATION_MS = 1960;
 const DRONE_PICKUP_HOLD_MS = 120;
 const DRONE_DROP_HOLD_MS = 95;
 const DRONE_CARRY_OFFSET_Y = 20;
+const DRONE_TUTORIAL_PANEL_WIDTH = 892;
+const DRONE_TUTORIAL_PANEL_HEIGHT = 562;
+const DRONE_TUTORIAL_VIEWPORT_WIDTH = 760;
+const DRONE_TUTORIAL_VIEWPORT_HEIGHT = 286;
+const DRONE_TUTORIAL_VIEWPORT_Y = 318;
+const DRONE_TUTORIAL_LOOP_PICKUP_DELAY_MS = 200;
+const DRONE_TUTORIAL_LOOP_PICKUP_FLY_MS = 460;
+const DRONE_TUTORIAL_LOOP_DROP_FLY_MS = 620;
+const DRONE_TUTORIAL_LOOP_HOLD_MS = 880;
 
 const LANE_SWAP_MIN_COOLDOWN_MS = 21000;
 const LANE_SWAP_MAX_COOLDOWN_MS = 33000;
@@ -369,6 +378,14 @@ export default class GameScene extends Phaser.Scene {
     this.droneCarryItemId = null;
     this.droneSabotageTimerMs = 0;
     this.droneRunToken = 0;
+    this.droneTutorialShownThisRun = false;
+    this.droneTutorialActive = false;
+    this.droneTutorialOverlay = null;
+    this.droneTutorialPreviewState = null;
+    this.droneTutorialPendingIncident = null;
+    this.droneTutorialLoopEvent = null;
+    this.droneTutorialLoopTweens = [];
+    this.droneTutorialLoopToken = 0;
 
     this.laneSwapActive = false;
     this.laneSwapTimerMs = Number.POSITIVE_INFINITY;
@@ -984,6 +1001,7 @@ export default class GameScene extends Phaser.Scene {
 
   resetRunState() {
     this.cleanupDroneSabotage(true);
+    this.cleanupDroneIncidentTutorial({ resumeGameplay: false });
     this.cleanupLaneSwapIncident({ preserveTimer: true });
     this.cleanupClawBreakWarning();
 
@@ -1038,6 +1056,15 @@ export default class GameScene extends Phaser.Scene {
     this.clawBreakWarningText = null;
     this.clawBreakWarningSubText = null;
     this.clawBreakWarningTint = null;
+
+    this.droneTutorialShownThisRun = false;
+    this.droneTutorialActive = false;
+    this.droneTutorialOverlay = null;
+    this.droneTutorialPreviewState = null;
+    this.droneTutorialPendingIncident = null;
+    this.droneTutorialLoopEvent = null;
+    this.droneTutorialLoopTweens = [];
+    this.droneTutorialLoopToken = 0;
 
     this.dragContext = null;
     this.simTimeScale = 1;
@@ -1389,6 +1416,7 @@ export default class GameScene extends Phaser.Scene {
     this.teardownLevelChestIntroState({ destroyDim: true });
     this.cleanupLaneSwapIncident({ preserveTimer: true });
     this.cleanupClawBreakWarning();
+    this.cleanupDroneIncidentTutorial({ resumeGameplay: false });
 
     this.isPaused = false;
     this.sceneTransitioning = false;
@@ -6663,6 +6691,444 @@ export default class GameScene extends Phaser.Scene {
     return Number.isFinite(levelIndex) && levelIndex >= DRONE_SABOTAGE_INTRO_LEVEL_INDEX;
   }
 
+  shouldShowDroneIncidentTutorial() {
+    if (this.droneTutorialShownThisRun || this.droneTutorialActive) {
+      return false;
+    }
+
+    if (this.levelMode === 'endless') {
+      return true;
+    }
+
+    if (this.levelMode !== 'campaign') {
+      return false;
+    }
+
+    const levelIndex = Number(this.levelConfig?.index);
+    return Number.isFinite(levelIndex) && levelIndex === DRONE_SABOTAGE_INTRO_LEVEL_INDEX;
+  }
+
+  cleanupDroneIncidentTutorial({ resumeGameplay = false } = {}) {
+    this.droneTutorialLoopToken += 1;
+
+    if (this.droneTutorialLoopEvent) {
+      this.droneTutorialLoopEvent.remove(false);
+      this.droneTutorialLoopEvent = null;
+    }
+
+    if (Array.isArray(this.droneTutorialLoopTweens)) {
+      this.droneTutorialLoopTweens.forEach((tween) => {
+        tween?.remove?.();
+      });
+    }
+    this.droneTutorialLoopTweens = [];
+
+    if (this.droneTutorialPreviewState) {
+      const { sourceItem, wrongItem, wrongLabel, drone } = this.droneTutorialPreviewState;
+      this.tweens.killTweensOf([sourceItem, wrongItem, wrongLabel, drone]);
+    }
+    this.droneTutorialPreviewState = null;
+
+    if (this.droneTutorialOverlay?.active) {
+      this.tweens.killTweensOf(this.droneTutorialOverlay);
+      this.droneTutorialOverlay.destroy(true);
+    }
+    this.droneTutorialOverlay = null;
+    this.droneTutorialPendingIncident = null;
+    this.droneTutorialActive = false;
+
+    if (
+      resumeGameplay
+      && !this.isGameOver
+      && !this.levelComplete
+      && !this.sceneTransitioning
+      && !this.isDraftActive
+      && !this.levelIntroActive
+    ) {
+      this.isPaused = false;
+    }
+  }
+
+  startDroneIncidentTutorial(targetItemId, dropPlan) {
+    if (this.droneTutorialActive || !this.shouldShowDroneIncidentTutorial()) {
+      return false;
+    }
+
+    if (this.sceneTransitioning || this.isGameOver || this.levelComplete || this.levelIntroActive || this.isDraftActive) {
+      return false;
+    }
+
+    this.droneTutorialShownThisRun = true;
+    this.droneTutorialActive = true;
+    this.droneTutorialPendingIncident = {
+      targetItemId,
+      dropPlan: dropPlan
+        ? {
+          laneId: dropPlan.laneId,
+          lanePos: dropPlan.lanePos
+        }
+        : null
+    };
+
+    this.abortActiveDrag();
+    this.isPaused = true;
+    this.droneTutorialLoopToken += 1;
+    const loopToken = this.droneTutorialLoopToken;
+
+    const overlay = this.add.container(0, 0).setDepth(368);
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x0b1220, 0.72).setInteractive();
+    scrim.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+    });
+
+    const softBlurLayer = this.add
+      .rectangle(640, 360, 1280, 720, 0xe2e8f0, 0.05)
+      .setBlendMode(Phaser.BlendModes.SCREEN);
+
+    const panelX = 640;
+    const panelY = 362;
+    const panelShadow = this.add.rectangle(panelX, panelY + 9, DRONE_TUTORIAL_PANEL_WIDTH, DRONE_TUTORIAL_PANEL_HEIGHT, 0x020617, 0.56);
+    const panel = this.add
+      .rectangle(panelX, panelY, DRONE_TUTORIAL_PANEL_WIDTH, DRONE_TUTORIAL_PANEL_HEIGHT, 0x4a2012, 0.97)
+      .setStrokeStyle(2, 0xf0bd85, 0.95);
+    const panelTopStrip = this.add.rectangle(panelX, panelY - 236, DRONE_TUTORIAL_PANEL_WIDTH - 74, 40, 0xffffff, 0.14);
+
+    const title = this.add
+      .text(panelX, panelY - 234, 'DRONE SABOTAGE PREVIEW', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '44px',
+        color: '#fff1e6',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(1.2)
+      .setShadow(0, 3, '#000000', 8);
+
+    const previewShadow = this.add.rectangle(640, DRONE_TUTORIAL_VIEWPORT_Y + 6, DRONE_TUTORIAL_VIEWPORT_WIDTH, DRONE_TUTORIAL_VIEWPORT_HEIGHT, 0x020617, 0.48);
+    const previewFrame = this.add
+      .rectangle(640, DRONE_TUTORIAL_VIEWPORT_Y, DRONE_TUTORIAL_VIEWPORT_WIDTH, DRONE_TUTORIAL_VIEWPORT_HEIGHT, 0x1f2937, 0.94)
+      .setStrokeStyle(2, 0xf0bd85, 0.72);
+
+    const previewContainer = this.add.container(640, DRONE_TUTORIAL_VIEWPORT_Y).setDepth(372);
+    const sourceLaneY = -64;
+    const wrongLaneY = 64;
+    const beltWidth = 618;
+    const beltHeight = 30;
+
+    const createBelt = (laneY, beltColor, stripeColor) => {
+      const parts = [];
+      const base = this.add
+        .rectangle(0, laneY, beltWidth, beltHeight, beltColor, 0.98)
+        .setStrokeStyle(2, 0x0f172a, 0.7);
+      parts.push(base);
+
+      for (let stripeX = -beltWidth * 0.5 + 18; stripeX < beltWidth * 0.5 - 14; stripeX += 44) {
+        parts.push(this.add.rectangle(stripeX, laneY, 20, 4, stripeColor, 0.34));
+      }
+
+      return parts;
+    };
+
+    const createMiniChest = (x, y) => {
+      const shadow = this.add.ellipse(0, 10, 44, 11, 0x020617, 0.3);
+      const body = this.add.rectangle(0, 5, 42, 24, 0x78350f, 1).setStrokeStyle(2, 0xfbbf24, 0.85);
+      const lid = this.add.rectangle(0, -8, 44, 12, 0x92400e, 1).setStrokeStyle(2, 0xfde68a, 0.85);
+      const lock = this.add.circle(0, 2, 4, 0xfef3c7, 1).setStrokeStyle(1, 0x78350f, 1);
+      return this.add.container(x, y, [shadow, body, lid, lock]);
+    };
+
+    const laneLabels = [
+      this.add
+        .text(-330, sourceLaneY - 26, 'CORRECT LANE', {
+          fontFamily: GAME_UI_FONT,
+          fontSize: '18px',
+          color: '#bbf7d0'
+        })
+        .setOrigin(0, 0.5)
+        .setShadow(0, 2, '#000000', 5),
+      this.add
+        .text(-330, wrongLaneY - 26, 'WRONG LANE', {
+          fontFamily: GAME_UI_FONT,
+          fontSize: '18px',
+          color: '#fecaca'
+        })
+        .setOrigin(0, 0.5)
+        .setShadow(0, 2, '#000000', 5)
+    ];
+
+    const sourceItem = this.add.circle(112, sourceLaneY, 12, 0x22c55e, 1).setStrokeStyle(2, 0x14532d, 1);
+    const wrongItem = this.add.circle(-176, wrongLaneY, 12, 0xef4444, 1).setStrokeStyle(2, 0x7f1d1d, 1).setAlpha(0);
+    const wrongLabel = this.add
+      .text(-176, wrongLaneY - 28, 'SABOTAGED', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '16px',
+        color: '#fecaca'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4)
+      .setAlpha(0);
+
+    const droneVisual = this.createDroneVisual();
+    const tutorialDrone = droneVisual.container;
+    tutorialDrone.setScale(0.33).setDepth(373).setAlpha(0);
+    this.droneTutorialLoopTweens.push(...droneVisual.rotorTweens);
+
+    const previewParts = [
+      ...createBelt(sourceLaneY, 0x334155, 0x94a3b8),
+      ...createBelt(wrongLaneY, 0x3f3f46, 0xa1a1aa),
+      createMiniChest(302, sourceLaneY),
+      createMiniChest(-302, wrongLaneY),
+      ...laneLabels,
+      sourceItem,
+      wrongItem,
+      wrongLabel,
+      tutorialDrone
+    ];
+    previewContainer.add(previewParts);
+
+    const description = this.add
+      .text(
+        640,
+        500,
+        'Drones will intentionally sabotage your flow by stealing a correctly sorted item and dropping it into the wrong lane. Spot it fast and recover before pressure spikes.',
+        {
+          fontFamily: GAME_UI_FONT,
+          fontSize: '24px',
+          color: '#fde68a',
+          align: 'center',
+          wordWrap: { width: 760, useAdvancedWrap: true },
+          lineSpacing: 6
+        }
+      )
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 8);
+
+    const buttonContainer = this.add.container(640, 610).setDepth(374);
+    const buttonShadow = this.add.rectangle(0, 6, 280, 66, 0x020617, 0.42);
+    const buttonBody = this.add
+      .rectangle(0, 0, 280, 66, 0x16a34a, 1)
+      .setStrokeStyle(2, 0xbbf7d0, 0.95);
+    const buttonGloss = this.add.rectangle(0, -14, 244, 18, 0xffffff, 0.2);
+    const buttonLabel = this.add
+      .text(0, 1, 'Understood', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '36px',
+        color: '#f0fdf4'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#064e3b', 4);
+    const buttonHit = this.add.zone(0, 0, 300, 82).setInteractive({ useHandCursor: true });
+
+    buttonHit.on('pointerover', () => {
+      buttonBody.setFillStyle(0x22c55e, 1);
+      buttonContainer.setScale(1.03);
+    });
+
+    buttonHit.on('pointerout', () => {
+      buttonBody.setFillStyle(0x16a34a, 1);
+      buttonContainer.setScale(1);
+    });
+
+    buttonHit.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+      this.acknowledgeDroneIncidentTutorial();
+    });
+
+    buttonContainer.add([buttonShadow, buttonBody, buttonGloss, buttonLabel, buttonHit]);
+
+    overlay.add([
+      scrim,
+      softBlurLayer,
+      panelShadow,
+      panel,
+      panelTopStrip,
+      title,
+      previewShadow,
+      previewFrame,
+      previewContainer,
+      description,
+      buttonContainer
+    ]);
+
+    this.droneTutorialOverlay = overlay;
+    this.droneTutorialPreviewState = {
+      sourceItem,
+      wrongItem,
+      wrongLabel,
+      drone: tutorialDrone,
+      sourceLaneY,
+      wrongLaneY,
+      sourceStartX: 112,
+      sourcePickupX: 172,
+      wrongDropX: -176,
+      droneEntryX: 320,
+      droneEntryY: -132,
+      droneExitX: -364,
+      droneExitY: -124
+    };
+
+    this.playDroneIncidentTutorialLoop(loopToken);
+    return true;
+  }
+
+  playDroneIncidentTutorialLoop(loopToken) {
+    if (loopToken !== this.droneTutorialLoopToken || !this.droneTutorialActive) {
+      return;
+    }
+
+    const preview = this.droneTutorialPreviewState;
+    if (!preview?.drone?.active || !preview?.sourceItem?.active || !preview?.wrongItem?.active) {
+      return;
+    }
+
+    const {
+      sourceItem,
+      wrongItem,
+      wrongLabel,
+      drone,
+      sourceLaneY,
+      wrongLaneY,
+      sourceStartX,
+      sourcePickupX,
+      wrongDropX,
+      droneEntryX,
+      droneEntryY,
+      droneExitX,
+      droneExitY
+    } = preview;
+
+    this.tweens.killTweensOf([sourceItem, wrongItem, wrongLabel, drone]);
+
+    sourceItem.setPosition(sourceStartX, sourceLaneY).setAlpha(1).setScale(1).setFillStyle(0x22c55e, 1);
+    wrongItem.setPosition(wrongDropX, wrongLaneY).setAlpha(0).setScale(0.8).setFillStyle(0xef4444, 1);
+    wrongLabel.setPosition(wrongDropX, wrongLaneY - 28).setAlpha(0).setScale(0.9);
+
+    drone
+      .setPosition(droneEntryX, droneEntryY)
+      .setAlpha(0)
+      .setScale(0.33)
+      .setAngle(0);
+
+    this.tweens.add({
+      targets: sourceItem,
+      x: sourcePickupX,
+      duration: DRONE_TUTORIAL_LOOP_PICKUP_DELAY_MS + DRONE_TUTORIAL_LOOP_PICKUP_FLY_MS + 220,
+      ease: 'Linear'
+    });
+
+    this.droneTutorialLoopEvent = this.time.delayedCall(DRONE_TUTORIAL_LOOP_PICKUP_DELAY_MS, () => {
+      if (loopToken !== this.droneTutorialLoopToken || !this.droneTutorialActive || !drone.active) {
+        return;
+      }
+
+      this.tweens.add({
+        targets: drone,
+        x: sourcePickupX,
+        y: sourceLaneY - 22,
+        alpha: 1,
+        duration: DRONE_TUTORIAL_LOOP_PICKUP_FLY_MS,
+        ease: 'Sine.InOut',
+        onComplete: () => {
+          if (loopToken !== this.droneTutorialLoopToken || !this.droneTutorialActive || !drone.active) {
+            return;
+          }
+
+          this.tweens.add({
+            targets: sourceItem,
+            alpha: 0.24,
+            scaleX: 0.82,
+            scaleY: 0.82,
+            duration: 120,
+            ease: 'Quad.InOut'
+          });
+
+          this.tweens.add({
+            targets: drone,
+            x: wrongDropX,
+            y: wrongLaneY - 20,
+            duration: DRONE_TUTORIAL_LOOP_DROP_FLY_MS,
+            ease: 'Sine.InOut',
+            onComplete: () => {
+              if (loopToken !== this.droneTutorialLoopToken || !this.droneTutorialActive || !drone.active) {
+                return;
+              }
+
+              this.tweens.add({
+                targets: wrongItem,
+                alpha: 1,
+                scaleX: 1,
+                scaleY: 1,
+                duration: 170,
+                ease: 'Back.Out'
+              });
+
+              this.tweens.add({
+                targets: wrongLabel,
+                alpha: 1,
+                scaleX: 1,
+                scaleY: 1,
+                duration: 170,
+                ease: 'Quad.Out',
+                yoyo: true,
+                hold: 220
+              });
+
+              this.tweens.add({
+                targets: drone,
+                x: droneExitX,
+                y: droneExitY,
+                alpha: 0,
+                duration: 420,
+                delay: 90,
+                ease: 'Sine.In'
+              });
+
+              this.droneTutorialLoopEvent = this.time.delayedCall(DRONE_TUTORIAL_LOOP_HOLD_MS, () => {
+                this.playDroneIncidentTutorialLoop(loopToken);
+              });
+            }
+          });
+        }
+      });
+    });
+  }
+
+  acknowledgeDroneIncidentTutorial() {
+    const pending = this.droneTutorialPendingIncident
+      ? {
+        targetItemId: this.droneTutorialPendingIncident.targetItemId,
+        dropPlan: this.droneTutorialPendingIncident.dropPlan
+          ? {
+            laneId: this.droneTutorialPendingIncident.dropPlan.laneId,
+            lanePos: this.droneTutorialPendingIncident.dropPlan.lanePos
+          }
+          : null
+      }
+      : null;
+
+    this.cleanupDroneIncidentTutorial({ resumeGameplay: true });
+
+    if (!pending || this.sceneTransitioning || this.isGameOver || this.levelComplete) {
+      return;
+    }
+
+    const preferredItem = this.getItemById(pending.targetItemId);
+    if (preferredItem) {
+      const preferredDrop = this.resolveDroneSabotageDropPlan(preferredItem, pending.dropPlan) || pending.dropPlan;
+      this.startDroneSabotageRun(preferredItem.id, preferredDrop);
+      return;
+    }
+
+    const fallbackItem = this.pickDroneSabotageTargetItem();
+    if (!fallbackItem) {
+      this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+      return;
+    }
+
+    const fallbackDrop = this.pickDroneWrongLaneDrop(fallbackItem);
+    this.startDroneSabotageRun(fallbackItem.id, fallbackDrop);
+  }
+
   resetDroneSabotageTimer(minMs = DRONE_SABOTAGE_MIN_COOLDOWN_MS, maxMs = DRONE_SABOTAGE_MAX_COOLDOWN_MS) {
     this.droneSabotageTimerMs = Phaser.Math.Between(minMs, maxMs);
   }
@@ -6738,6 +7204,13 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const dropPlan = this.pickDroneWrongLaneDrop(targetItem);
+    if (this.shouldShowDroneIncidentTutorial()) {
+      const startedTutorial = this.startDroneIncidentTutorial(targetItem.id, dropPlan);
+      if (startedTutorial) {
+        return;
+      }
+    }
+
     this.startDroneSabotageRun(targetItem.id, dropPlan);
   }
 
