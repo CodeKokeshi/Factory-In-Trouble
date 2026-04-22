@@ -161,7 +161,7 @@ export default class MainMenuScene extends Phaser.Scene {
     });
 
     const title = this.add
-      .text(640, 86, 'ASSEMBLY LINE CHAOS', {
+      .text(640, 86, 'BROKEN FACTORY', {
         fontFamily: MENU_DISPLAY_FONT,
         fontSize: '62px',
         color: '#7e261b',
@@ -179,7 +179,7 @@ export default class MainMenuScene extends Phaser.Scene {
     }
 
     const strapline = this.add
-      .text(640, 144, 'Prep fast. Plate clean. Keep the kitchen line alive.', {
+      .text(640, 144, 'The damn factory does not do its job. ', {
         fontFamily: MENU_UI_FONT,
         fontSize: '24px',
         color: '#8a4e2f',
