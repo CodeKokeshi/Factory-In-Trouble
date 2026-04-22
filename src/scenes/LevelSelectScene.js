@@ -1,6 +1,10 @@
 import Phaser from 'phaser';
 import { DEBUG_LEVEL_ID, getCampaignLevels } from '../data/levels';
-import { getCompletedCampaignLevelIds } from '../data/campaignProgress';
+import {
+  cycleCampaignProgressBracketHotkey,
+  getCompletedCampaignLevelIds,
+  isCampaignBracketProgressHotkeyEvent
+} from '../data/campaignProgress';
 
 const FOOD_COLORS = {
   condiments: 0xf97316,
@@ -547,6 +551,10 @@ export default class LevelSelectScene extends Phaser.Scene {
 
   refreshSelectionVisuals() {
     this.levelTiles.forEach((tile, index) => {
+      const locked = this.isLevelLocked(index);
+      tile.isLocked = locked;
+      tile.lockDimmer.setFillStyle(0x130804, locked ? 0.52 : 0);
+
       const isSelected = index === this.selectedIndex;
       tile.background.setStrokeStyle(isSelected ? 3 : 2, isSelected ? 0xffe4bf : 0xf0bd85, 0.98);
       tile.background.setFillStyle(isSelected ? 0x9a5831 : 0x7a4327, isSelected ? 0.98 : 0.94);
@@ -556,8 +564,8 @@ export default class LevelSelectScene extends Phaser.Scene {
       tile.subtitleText.setColor(isSelected ? '#ffe4c5' : '#ffd6ab');
       tile.badge.setFillStyle(isSelected ? 0xd17d48 : 0xbd6a38, 0.95);
       tile.quotaChip.setFillStyle(isSelected ? 0x39a370 : 0x2c8059, 0.95);
-      tile.lockDimmer.setAlpha(tile.isLocked ? (isSelected ? 0.58 : 0.52) : 0);
-      tile.lockedLabel.setAlpha(tile.isLocked ? 1 : 0);
+      tile.lockDimmer.setAlpha(locked ? (isSelected ? 0.58 : 0.52) : 0);
+      tile.lockedLabel.setAlpha(locked ? 1 : 0);
 
       if (tile.selectionTween) {
         tile.selectionTween.remove();
@@ -629,6 +637,19 @@ export default class LevelSelectScene extends Phaser.Scene {
       return;
     }
 
+    if (isCampaignBracketProgressHotkeyEvent(event)) {
+      event.preventDefault?.();
+      const result = cycleCampaignProgressBracketHotkey(this.levelEntries.map((entry) => entry.id));
+      this.completedCampaignLevelIds = getCompletedCampaignLevelIds();
+      const fallback = this.getHighestUnlockedLevelIndex();
+      if (this.isLevelLocked(this.selectedIndex)) {
+        this.selectedIndex = fallback;
+      }
+      this.refreshSelectionVisuals();
+      this.showCampaignCheatToast(result.message);
+      return;
+    }
+
     const isBackslash = event.code === 'Backslash' || event.key === '\\';
     if (!isBackslash) {
       return;
@@ -636,6 +657,46 @@ export default class LevelSelectScene extends Phaser.Scene {
 
     event.preventDefault?.();
     this.launchLevelById(DEBUG_LEVEL_ID, 'Loading Debug');
+  }
+
+  showCampaignCheatToast(message) {
+    if (!message) {
+      return;
+    }
+
+    const toast = this.add
+      .text(640, 668, message, {
+        fontFamily: SELECT_UI_FONT,
+        fontSize: '20px',
+        color: '#fef9c3',
+        align: 'center',
+        stroke: '#422006',
+        strokeThickness: 4
+      })
+      .setOrigin(0.5)
+      .setDepth(400)
+      .setAlpha(0);
+
+    this.tweens.add({
+      targets: toast,
+      alpha: 1,
+      duration: 90,
+      ease: 'Quad.Out',
+      onComplete: () => {
+        this.tweens.add({
+          targets: toast,
+          alpha: 0,
+          delay: 2200,
+          duration: 420,
+          ease: 'Quad.In',
+          onComplete: () => {
+            if (toast?.active) {
+              toast.destroy();
+            }
+          }
+        });
+      }
+    });
   }
 
   launchLevelById(levelId, loadingLabel = 'Loading Shift') {

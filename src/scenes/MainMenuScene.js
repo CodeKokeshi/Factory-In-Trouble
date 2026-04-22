@@ -1,5 +1,9 @@
 import Phaser from 'phaser';
-import { DEBUG_LEVEL_ID, DEFAULT_LEVEL_ID } from '../data/levels';
+import {
+  cycleCampaignProgressBracketHotkey,
+  isCampaignBracketProgressHotkeyEvent
+} from '../data/campaignProgress';
+import { DEBUG_LEVEL_ID, DEFAULT_LEVEL_ID, getCampaignLevels } from '../data/levels';
 import beforeFirstShiftUrl from '../../assets/audio/music/Before_the_First_Shift.mp3';
 
 const MENU_MUSIC_GAIN = 0.82;
@@ -742,6 +746,14 @@ export default class MainMenuScene extends Phaser.Scene {
       return;
     }
 
+    if (isCampaignBracketProgressHotkeyEvent(event)) {
+      event.preventDefault?.();
+      const levels = getCampaignLevels();
+      const result = cycleCampaignProgressBracketHotkey(levels.map((entry) => entry.id));
+      this.showCampaignCheatToast(result.message);
+      return;
+    }
+
     const isBackslash = event.code === 'Backslash' || event.key === '\\';
     if (!isBackslash) {
       return;
@@ -749,6 +761,46 @@ export default class MainMenuScene extends Phaser.Scene {
 
     event.preventDefault?.();
     this.launchDebugLevel();
+  }
+
+  showCampaignCheatToast(message) {
+    if (!message) {
+      return;
+    }
+
+    const toast = this.add
+      .text(640, 668, message, {
+        fontFamily: MENU_UI_FONT,
+        fontSize: '20px',
+        color: '#fef9c3',
+        align: 'center',
+        stroke: '#422006',
+        strokeThickness: 4
+      })
+      .setOrigin(0.5)
+      .setDepth(400)
+      .setAlpha(0);
+
+    this.tweens.add({
+      targets: toast,
+      alpha: 1,
+      duration: 90,
+      ease: 'Quad.Out',
+      onComplete: () => {
+        this.tweens.add({
+          targets: toast,
+          alpha: 0,
+          delay: 2200,
+          duration: 420,
+          ease: 'Quad.In',
+          onComplete: () => {
+            if (toast?.active) {
+              toast.destroy();
+            }
+          }
+        });
+      }
+    });
   }
 
   launchDebugLevel() {
