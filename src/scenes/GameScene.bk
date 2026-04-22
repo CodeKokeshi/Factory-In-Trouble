@@ -1,6 +1,17 @@
 import Phaser from 'phaser';
-import { DEBUG_LEVEL_ID, DEFAULT_LEVEL_ID, getLevelById, getNextCampaignLevelId } from '../data/levels';
-import { markCampaignLevelCompleted } from '../data/campaignProgress';
+import {
+  DEBUG_LEVEL_ID,
+  DEFAULT_LEVEL_ID,
+  getCampaignLevels,
+  getLevelById,
+  getNextCampaignLevelId
+} from '../data/levels';
+import {
+  cycleCampaignProgressBracketHotkey,
+  isCampaignBracketProgressHotkeyEvent,
+  markCampaignLevelCompleted
+} from '../data/campaignProgress';
+import { createVictoryOverlay } from '../ui/victoryOverlay';
 import assemblyLineShuffleUrl from '../../assets/audio/music/The_Assembly_Line_Shuffle.mp3';
 import bannersOverPeakUrl from '../../assets/audio/music/Banners_Over_the_Peak.mp3';
 import ratioedInTheLobbyUrl from '../../assets/audio/music/Ratioed_In_The_Lobby.mp3';
@@ -54,6 +65,8 @@ const DRONE_TUTORIAL_BUTTON_LOCK_MS = 1000;
 const DRONE_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_drone_tutorial_disabled_v1';
 const JAM_BEETLE_TUTORIAL_BUTTON_LOCK_MS = 2000;
 const JAM_BEETLE_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_beetle_tutorial_disabled_v1';
+const CLAW_BREAKDOWN_TUTORIAL_BUTTON_LOCK_MS = 2000;
+const CLAW_BREAKDOWN_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_claw_breakdown_tutorial_disabled_v1';
 const TUTORIAL_RESET_HOTKEY_CODE = 221; // ]
 
 const LANE_SWAP_MIN_COOLDOWN_MS = 21000;
@@ -89,6 +102,18 @@ const CLAW_BREAKDOWN_WARNING_DURATION_MS = 1300;
 const CLAW_BREAKDOWN_HUD_PANEL_WIDTH = 378;
 const CLAW_BREAKDOWN_HUD_BAR_HEIGHT = 12;
 const CLAW_BREAKDOWN_HUD_MAX_ROWS = 3;
+
+const STEAM_HAZARD_INTRO_LEVEL_INDEX = 6;
+const STEAM_HAZARD_MIN_COOLDOWN_MS = 11000;
+const STEAM_HAZARD_MAX_COOLDOWN_MS = 17500;
+const STEAM_HAZARD_RETRY_MIN_MS = 1600;
+const STEAM_HAZARD_RETRY_MAX_MS = 3200;
+const STEAM_HAZARD_CHEST_CLEAR_SLOTS = 2;
+const STEAM_HAZARD_RISE_DURATION_MS = 520;
+const STEAM_HAZARD_VISIBLE_DURATION_MS = 3200;
+const STEAM_HAZARD_FALL_DURATION_MS = 480;
+const STEAM_HAZARD_TUTORIAL_DISABLE_STORAGE_KEY = 'machines_phaser_steam_hazard_tutorial_disabled_v1';
+const STEAM_HAZARD_TUTORIAL_BUTTON_LOCK_MS = 1000;
 const HUD_COMPACT_SOFT_ROW_COUNT = 2;
 const HUD_COMPACT_HARD_ROW_COUNT = 7;
 const REPAIR_HUD_MAX_ROWS_SOLO = 3;
@@ -374,6 +399,9 @@ export default class GameScene extends Phaser.Scene {
     this.score = 0;
     this.multiplier = 1;
     this.maxMultiplier = 20;
+    this.maxComboReached = 1;
+    this.jamCount = 0;
+    this.levelStartTimeMs = 0;
     this.scoreText = null;
     this.multiplierText = null;
     this.comboMilestoneTier = 0;
@@ -427,6 +455,29 @@ export default class GameScene extends Phaser.Scene {
     this.clawBreakWarningText = null;
     this.clawBreakWarningSubText = null;
     this.clawBreakWarningTint = null;
+    this.clawBreakTutorialShownThisRun = false;
+    this.clawBreakTutorialActive = false;
+    this.clawBreakTutorialOverlay = null;
+    this.clawBreakTutorialPreviewState = null;
+    this.clawBreakTutorialButtonUnlockEvent = null;
+    this.clawBreakTutorialPreferenceLoaded = false;
+    this.clawBreakTutorialDoNotShowAgain = false;
+    this.clawBreakTutorialPendingLaneId = null;
+
+    this.steamHazardTimerMs = 0;
+    this.steamCloudActive = false;
+    this.steamCloudGraphics = null;
+    this.steamCloudTweens = [];
+    this.steamHazardVfxList = [];
+    this.steamCloudRunToken = 0;
+    this.steamTutorialShownThisRun = false;
+    this.steamTutorialActive = false;
+    this.steamTutorialOverlay = null;
+    this.steamTutorialPreviewState = null;
+    this.steamTutorialButtonUnlockEvent = null;
+    this.steamTutorialPendingLaneId = null;
+    this.steamTutorialPreferenceLoaded = false;
+    this.steamTutorialDoNotShowAgain = false;
 
     this.isGameOver = false;
     this.isPaused = false;
@@ -436,6 +487,7 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBody = null;
     this.pauseButtonBars = [];
     this.pauseMenuContainer = null;
+    this.pauseMenuFailSafeEvent = null;
     this.clogTimerSeconds = 0;
     this.clogGraceSeconds = 1.4;
     this.gameOverOverlay = null;
@@ -623,7 +675,7 @@ export default class GameScene extends Phaser.Scene {
     const clawBreakdownCampaignEnabled = this.levelMode === 'campaign'
       && Number.isFinite(levelIndex)
       && levelIndex >= CLAW_BREAKDOWN_INTRO_LEVEL_INDEX;
-    const clawBreakdownEndlessEnabled = this.levelMode === 'endless';
+    const clawBreakdownEndlessEnabled = this.levelMode === 'endless' && this.levelId !== DEBUG_LEVEL_ID;
     this.clawBreakdownEnabled = clawBreakdownCampaignEnabled || clawBreakdownEndlessEnabled;
     this.clawBreakdownDebugTextEnabled = false;
     this.levelLayoutFamily = levelConfig?.layoutFamily || 'rotated_h';
@@ -1030,6 +1082,8 @@ export default class GameScene extends Phaser.Scene {
     this.cleanupBeetleTutorial({ resumeGameplay: false });
     this.cleanupLaneSwapIncident({ preserveTimer: true });
     this.cleanupClawBreakWarning();
+    this.cleanupSteamHazard();
+    this.cleanupSteamHazardTutorial({ resumeGameplay: false });
 
     this.spawnTimerMs = 0;
     this.spawnBlockedThisFrame = false;
@@ -1046,6 +1100,9 @@ export default class GameScene extends Phaser.Scene {
     this.rejectedCount = 0;
     this.score = 0;
     this.multiplier = 1;
+    this.maxComboReached = 1;
+    this.jamCount = 0;
+    this.levelStartTimeMs = this.time?.now ?? 0;
     this.comboMilestoneTier = 0;
 
     this.isGameOver = false;
@@ -1056,6 +1113,7 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBody = null;
     this.pauseButtonBars = [];
     this.pauseMenuContainer = null;
+    this.clearPauseMenuFailSafe();
     this.levelComplete = false;
     this.clogTimerSeconds = 0;
     this.gameOverOverlay = null;
@@ -1082,6 +1140,12 @@ export default class GameScene extends Phaser.Scene {
     this.clawBreakWarningText = null;
     this.clawBreakWarningSubText = null;
     this.clawBreakWarningTint = null;
+    this.clawBreakTutorialShownThisRun = false;
+    this.clawBreakTutorialActive = false;
+    this.clawBreakTutorialOverlay = null;
+    this.clawBreakTutorialPreviewState = null;
+    this.clawBreakTutorialButtonUnlockEvent = null;
+    this.clawBreakTutorialPendingLaneId = null;
 
     this.droneTutorialShownThisRun = false;
     this.droneTutorialActive = false;
@@ -1098,6 +1162,16 @@ export default class GameScene extends Phaser.Scene {
     this.beetleTutorialPreviewState = null;
     this.beetleTutorialButtonUnlockEvent = null;
     this.beetleTutorialPendingSpawnLaneId = null;
+
+    this.steamTutorialShownThisRun = false;
+    this.steamTutorialActive = false;
+    this.steamTutorialOverlay = null;
+    this.steamTutorialPreviewState = null;
+    if (this.steamTutorialButtonUnlockEvent) {
+      this.steamTutorialButtonUnlockEvent.remove(false);
+      this.steamTutorialButtonUnlockEvent = null;
+    }
+    this.steamTutorialPendingLaneId = null;
 
     this.dragContext = null;
     this.simTimeScale = 1;
@@ -1158,6 +1232,12 @@ export default class GameScene extends Phaser.Scene {
       this.resetLaneSwapTimer();
     } else {
       this.laneSwapTimerMs = Number.POSITIVE_INFINITY;
+    }
+
+    if (this.isSteamHazardLevelEnabled()) {
+      this.resetSteamHazardTimer();
+    } else {
+      this.steamHazardTimerMs = Number.POSITIVE_INFINITY;
     }
 
     this.resetChestPriorityCharges();
@@ -1452,6 +1532,8 @@ export default class GameScene extends Phaser.Scene {
     this.cleanupClawBreakWarning();
     this.cleanupDroneIncidentTutorial({ resumeGameplay: false });
     this.cleanupBeetleTutorial({ resumeGameplay: false });
+    this.cleanupSteamHazard();
+    this.cleanupSteamHazardTutorial({ resumeGameplay: false });
 
     this.isPaused = false;
     this.sceneTransitioning = false;
@@ -1460,6 +1542,7 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBody = null;
     this.pauseButtonBars = [];
     this.pauseMenuContainer = null;
+    this.clearPauseMenuFailSafe();
     this.cleanupDroneSabotage(true);
 
     this.stopBgmSource();
@@ -1493,6 +1576,32 @@ export default class GameScene extends Phaser.Scene {
   }
 
   handleGameplayKeyDown(event) {
+    const key = String(event?.key || '').toLowerCase();
+    if (key === 'escape' || event?.code === 'Escape') {
+      if (this.pauseTransitionLock || this.isGameOver || this.levelComplete || this.sceneTransitioning || this.isDraftActive) {
+        return;
+      }
+
+      if (this.isPaused) {
+        this.resumeFromPause();
+      } else {
+        this.handlePauseButtonPressed();
+      }
+      return;
+    }
+
+    if (isCampaignBracketProgressHotkeyEvent(event)) {
+      if (this.sceneTransitioning) {
+        return;
+      }
+
+      event.preventDefault?.();
+      const result = cycleCampaignProgressBracketHotkey(getCampaignLevels().map((entry) => entry.id));
+      this.emitFloatingText(640, 120, result.message, '#fef9c3', 22);
+      this.playSfx('transfer', 0.85);
+      return;
+    }
+
     const keyCode = Number(event?.keyCode ?? event?.which ?? -1);
     if (keyCode !== this.tutorialResetHotkeyCode || event?.repeat) {
       return;
@@ -1504,12 +1613,20 @@ export default class GameScene extends Phaser.Scene {
   resetTutorialSuppressionFlags() {
     this.setDroneIncidentTutorialDisabled(false);
     this.setJamBeetleTutorialDisabled(false);
+    this.setClawBreakdownTutorialDisabled(false);
+    this.setSteamHazardTutorialDisabled(false);
     this.droneTutorialShownThisRun = false;
     this.droneTutorialPreferenceLoaded = true;
     this.droneTutorialDoNotShowAgain = false;
     this.beetleTutorialShownThisRun = false;
     this.beetleTutorialPreferenceLoaded = true;
     this.beetleTutorialDoNotShowAgain = false;
+    this.clawBreakTutorialShownThisRun = false;
+    this.clawBreakTutorialPreferenceLoaded = true;
+    this.clawBreakTutorialDoNotShowAgain = false;
+    this.steamTutorialShownThisRun = false;
+    this.steamTutorialPreferenceLoaded = true;
+    this.steamTutorialDoNotShowAgain = false;
 
     this.emitFloatingText(640, 116, 'TUTORIALS RESET', '#bbf7d0', 24);
     this.playSfx('transfer', 0.9);
@@ -4639,6 +4756,13 @@ export default class GameScene extends Phaser.Scene {
     this.pauseButtonBars = [leftBar, rightBar];
   }
 
+  clearPauseMenuFailSafe() {
+    if (this.pauseMenuFailSafeEvent) {
+      this.pauseMenuFailSafeEvent.remove(false);
+      this.pauseMenuFailSafeEvent = null;
+    }
+  }
+
   handlePauseButtonPressed() {
     if (
       this.isPaused
@@ -4653,12 +4777,31 @@ export default class GameScene extends Phaser.Scene {
     this.pauseTransitionLock = true;
     this.isPaused = true;
     this.abortActiveDrag();
+    if (this.droneActive) {
+      this.cleanupDroneSabotage(true);
+      this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+    }
 
     if (!this.pauseButtonContainer?.active) {
+      this.clearPauseMenuFailSafe();
       this.pauseTransitionLock = false;
       this.openPauseMenu();
       return;
     }
+
+    this.clearPauseMenuFailSafe();
+    this.pauseMenuFailSafeEvent = this.time.delayedCall(320, () => {
+      this.pauseMenuFailSafeEvent = null;
+      if (!this.isPaused || this.sceneTransitioning || this.isGameOver || this.levelComplete) {
+        this.pauseTransitionLock = false;
+        return;
+      }
+
+      if (!this.pauseMenuContainer?.active) {
+        this.openPauseMenu();
+      }
+      this.pauseTransitionLock = false;
+    });
 
     this.tweens.killTweensOf(this.pauseButtonContainer);
     this.pauseButtonBars.forEach((bar) => this.tweens.killTweensOf(bar));
@@ -4671,6 +4814,7 @@ export default class GameScene extends Phaser.Scene {
       yoyo: true,
       ease: 'Quad.Out',
       onComplete: () => {
+        this.clearPauseMenuFailSafe();
         this.openPauseMenu();
         this.pauseTransitionLock = false;
       }
@@ -4689,6 +4833,8 @@ export default class GameScene extends Phaser.Scene {
     if (!this.isPaused || this.pauseMenuContainer?.active) {
       return;
     }
+
+    this.clearPauseMenuFailSafe();
 
     const container = this.add.container(0, 0).setDepth(370);
     const scrim = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.72).setInteractive();
@@ -4847,6 +4993,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   closePauseMenu(animate = true, onComplete = null) {
+    this.clearPauseMenuFailSafe();
     const complete = () => {
       this.pauseMenuContainer = null;
       if (typeof onComplete === 'function') {
@@ -4953,6 +5100,41 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
+  formatComboValue(value) {
+    const safeValue = Number.isFinite(value) ? Math.max(1, value) : 1;
+    if (safeValue < 20) {
+      return `${Math.round(safeValue)}`;
+    }
+
+    return safeValue.toFixed(1);
+  }
+
+  applyComboGain(baseGain) {
+    const gainSteps = Math.max(1, Math.floor(baseGain || 1));
+    let nextMultiplier = this.multiplier;
+
+    for (let step = 0; step < gainSteps; step += 1) {
+      nextMultiplier += nextMultiplier < 20 ? 1 : 0.5;
+    }
+
+    this.multiplier = Math.round(nextMultiplier * 2) / 2;
+    this.maxComboReached = Math.max(this.maxComboReached, this.multiplier);
+  }
+
+  getElapsedLevelSeconds() {
+    const nowMs = this.time?.now ?? this.levelStartTimeMs;
+    const elapsedMs = Math.max(0, nowMs - this.levelStartTimeMs);
+    return elapsedMs / 1000;
+  }
+
+  formatDurationSeconds(seconds) {
+    const safeSeconds = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+    const wholeMinutes = Math.floor(safeSeconds / 60);
+    const remainder = safeSeconds - wholeMinutes * 60;
+    const paddedRemainder = remainder.toFixed(1).padStart(4, '0');
+    return `${wholeMinutes}:${paddedRemainder}`;
+  }
+
   refreshScoreUi() {
     if (this.levelInfoText) {
       this.levelInfoText.setText(this.levelName);
@@ -4970,7 +5152,7 @@ export default class GameScene extends Phaser.Scene {
       this.scoreText.setText(`SCORE ${this.score}`);
     }
     if (this.multiplierText) {
-      this.multiplierText.setText(`x${this.multiplier}`);
+      this.multiplierText.setText(`x${this.formatComboValue(this.multiplier)}`);
     }
   }
 
@@ -5007,7 +5189,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const multiplierGain = this.comboFurnaceMs > 0 ? this.comboFurnaceMultiplierGain : 1;
-    this.multiplier = Math.min(this.multiplier + multiplierGain, this.maxMultiplier);
+    this.applyComboGain(multiplierGain);
     this.musicComboRisePulseMs = Math.min(520, this.musicComboRisePulseMs + 90 + multiplierGain * 18);
 
     this.refreshScoreUi();
@@ -5018,7 +5200,7 @@ export default class GameScene extends Phaser.Scene {
     if (milestoneTier > this.comboMilestoneTier) {
       this.comboMilestoneTier = milestoneTier;
       this.musicComboRisePulseMs = 520;
-      this.emitFloatingText(640, 236, `COMBO x${this.multiplier}!`, '#67e8f9', 30);
+      this.emitFloatingText(640, 236, `COMBO x${this.formatComboValue(this.multiplier)}!`, '#67e8f9', 30);
       this.playImpactFx(0.85, 0x22d3ee);
       this.emitShockRing(640, 360, 0x22d3ee, 3.3, 280);
       this.playSfx('combo-tier', 1 + milestoneTier * 0.1);
@@ -5123,6 +5305,7 @@ export default class GameScene extends Phaser.Scene {
     this.syncItemPositions();
     this.updateDroneSabotage(scaledDeltaMs);
     this.updateLaneSwapIncident(scaledDeltaMs);
+    this.updateSteamHazard(scaledDeltaMs);
 
     this.checkForLevelComplete();
     if (this.levelComplete) {
@@ -5167,6 +5350,7 @@ export default class GameScene extends Phaser.Scene {
     this.setSlowMotion(false);
     this.abortActiveDrag();
     this.cleanupDroneSabotage(true);
+    this.cleanupSteamHazard();
     this.playImpactFx(1.05, 0x22c55e);
     this.playSfx('combo-tier', 1.2);
     this.emitShockRing(640, 360, 0x22c55e, 3.4, 280);
@@ -5174,158 +5358,6 @@ export default class GameScene extends Phaser.Scene {
     this.startLevelClearMusicTransition();
 
     const nextLevelId = getNextCampaignLevelId(this.levelId);
-    this.levelResultOverlay = this.add.rectangle(640, 360, 1280, 720, 0x1b0905, 0.74).setDepth(380).setInteractive();
-    this.levelResultOverlay.on('pointerdown', (_pointer, _x, _y, event) => {
-      event?.stopPropagation();
-    });
-
-    const panelContainer = this.add.container(0, 0).setDepth(390).setAlpha(0);
-
-    const panelWidth = 646;
-    const panelHeight = nextLevelId ? 500 : 444;
-    const panelRadius = 28;
-    const panelX = 640;
-    const panelY = 360;
-    const panelTop = panelY - panelHeight * 0.5;
-    const panelLeft = panelX - panelWidth * 0.5;
-
-    const panelShadow = this.add.graphics();
-    panelShadow.fillStyle(0x1b0905, 0.52);
-    panelShadow.fillRoundedRect(panelLeft, panelTop + 10, panelWidth, panelHeight, panelRadius);
-
-    const panel = this.add.graphics();
-    panel.fillStyle(0x4a2012, 0.97);
-    panel.fillRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, panelRadius);
-    panel.lineStyle(2, 0xf0bd85, 1);
-    panel.strokeRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, panelRadius);
-
-    const topStrip = this.add.graphics();
-    topStrip.fillStyle(0xffffff, 0.14);
-    topStrip.fillRoundedRect(panelX - 272, panelTop + 36, 544, 40, 14);
-
-    const divider = this.add.rectangle(panelX, panelTop + 236, panelWidth - 120, 2, 0xf0bd85, 0.32);
-
-    const titleText = this.add
-      .text(panelX, panelTop + 72, 'SHIFT CLEAR', {
-        fontFamily: GAME_DISPLAY_FONT,
-        fontSize: '66px',
-        color: '#fff0d9',
-        align: 'center'
-      })
-      .setOrigin(0.5)
-      .setLetterSpacing(1.4)
-      .setShadow(0, 3, '#000000', 10);
-
-    this.levelResultText = this.add
-      .text(panelX, panelTop + 148, this.levelName, {
-        fontFamily: GAME_UI_FONT,
-        fontSize: '34px',
-        color: '#ffd9b3',
-        align: 'center'
-      })
-      .setOrigin(0.5)
-      .setLetterSpacing(0.9);
-
-    const summaryText = this.add
-      .text(panelX, panelTop + 204, `BOX ${this.acceptedCount}/${this.levelQuota}   SCORE ${this.score}`, {
-        fontFamily: GAME_UI_FONT,
-        fontSize: '28px',
-        color: '#ffe7cc',
-        align: 'center'
-      })
-      .setOrigin(0.5)
-      .setLetterSpacing(0.8);
-
-    panelContainer.add([panelShadow, panel, topStrip, divider, titleText, this.levelResultText, summaryText]);
-
-    let resultLocked = false;
-    const createResultButton = (label, y, accentColor, onSelect) => {
-      const entry = this.add.container(640, y);
-
-      const shadowMid = this.add.rectangle(0, 7, 360, 72, 0x1b0905, 0.44);
-      const shadowLeft = this.add.circle(-180, 7, 36, 0x1b0905, 0.44);
-      const shadowRight = this.add.circle(180, 7, 36, 0x1b0905, 0.44);
-
-      const bodyMid = this.add.rectangle(0, 0, 360, 72, 0x7a4327, 1);
-      const bodyLeft = this.add.circle(-180, 0, 36, 0x7a4327, 1);
-      const bodyRight = this.add.circle(180, 0, 36, 0x7a4327, 1);
-      const glossMid = this.add.rectangle(0, -15, 328, 20, 0xffffff, 0.14);
-      const glossLeft = this.add.circle(-164, -15, 10, 0xffffff, 0.14);
-      const glossRight = this.add.circle(164, -15, 10, 0xffffff, 0.14);
-      const accentDot = this.add.circle(-150, 0, 8, accentColor, 1);
-
-      const labelText = this.add
-        .text(0, 0, label, {
-          fontFamily: GAME_DISPLAY_FONT,
-          fontSize: '42px',
-          color: '#fff5ea',
-          align: 'center'
-        })
-        .setOrigin(0.5)
-        .setLetterSpacing(1.2)
-        .setShadow(0, 2, '#6b3418', 4);
-
-      const hitArea = this.add.zone(0, 0, 420, 88).setInteractive({ useHandCursor: true });
-
-      const setHighlighted = (highlighted) => {
-        const fill = highlighted ? 0x915131 : 0x7a4327;
-        bodyMid.setFillStyle(fill, 1);
-        bodyLeft.setFillStyle(fill, 1);
-        bodyRight.setFillStyle(fill, 1);
-        accentDot.setScale(highlighted ? 1.24 : 1);
-        labelText.setScale(highlighted ? 1.03 : 1);
-      };
-
-      hitArea.on('pointerover', () => {
-        if (resultLocked) {
-          return;
-        }
-        setHighlighted(true);
-      });
-
-      hitArea.on('pointerout', () => {
-        setHighlighted(false);
-      });
-
-      hitArea.on('pointerdown', (_pointer, _x, _y, event) => {
-        event?.stopPropagation();
-        if (resultLocked) {
-          return;
-        }
-
-        resultLocked = true;
-        this.tweens.killTweensOf(entry);
-        this.tweens.add({
-          targets: entry,
-          scaleX: 0.94,
-          scaleY: 0.94,
-          duration: 85,
-          yoyo: true,
-          ease: 'Quad.Out',
-          onComplete: () => {
-            onSelect();
-          }
-        });
-      });
-
-      entry.add([
-        shadowMid,
-        shadowLeft,
-        shadowRight,
-        bodyMid,
-        bodyLeft,
-        bodyRight,
-        glossMid,
-        glossLeft,
-        glossRight,
-        accentDot,
-        labelText,
-        hitArea
-      ]);
-
-      panelContainer.add(entry);
-      return entry;
-    };
 
     const transitionToSelection = () => {
       if (this.sceneTransitioning) {
@@ -5355,22 +5387,25 @@ export default class GameScene extends Phaser.Scene {
       });
     };
 
-    if (nextLevelId) {
-      createResultButton('Next Shift', panelTop + 306, 0x34d399, transitionToNextLevel);
-      createResultButton('Level Select', panelTop + 388, 0xf59e0b, transitionToSelection);
-    } else {
-      createResultButton('Level Select', panelTop + 344, 0x34d399, transitionToSelection);
-    }
-
-    panelContainer.setScale(0.975);
-    this.tweens.add({
-      targets: panelContainer,
-      alpha: 1,
-      scaleX: 1,
-      scaleY: 1,
-      duration: 240,
-      ease: 'Back.Out'
+    const victoryOverlay = createVictoryOverlay(this, {
+      levelName: this.levelName,
+      acceptedCount: this.acceptedCount,
+      levelQuota: this.levelQuota,
+      score: this.score,
+      maxCombo: this.formatComboValue(this.maxComboReached),
+      jamCount: this.jamCount,
+      finishTime: this.formatDurationSeconds(this.getElapsedLevelSeconds()),
+      hasNextLevel: Boolean(nextLevelId),
+      onNextLevel: transitionToNextLevel,
+      onLevelSelect: transitionToSelection,
+      fonts: {
+        display: GAME_DISPLAY_FONT,
+        ui: GAME_UI_FONT
+      }
     });
+
+    this.levelResultOverlay = victoryOverlay.overlay;
+    this.levelResultText = victoryOverlay.levelNameText;
   }
 
   checkForGameOver(dt) {
@@ -5447,6 +5482,7 @@ export default class GameScene extends Phaser.Scene {
     this.setSlowMotion(false);
     this.abortActiveDrag();
     this.cleanupDroneSabotage(true);
+    this.cleanupSteamHazard();
     this.startGameOverMusicTransition();
     this.playImpactFx(1.35, 0xef4444);
     this.playSfx('game-over', 1.2);
@@ -6550,7 +6586,134 @@ export default class GameScene extends Phaser.Scene {
     this.refreshLaneClawBreakdownVisual(lane);
   }
 
-  cleanupClawBreakWarning() {
+  shouldShowClawBreakdownTutorial() {
+    this.loadClawBreakdownTutorialPreference();
+    if (this.clawBreakTutorialDoNotShowAgain) {
+      return false;
+    }
+
+    if (this.clawBreakTutorialShownThisRun || this.clawBreakTutorialActive) {
+      return false;
+    }
+
+    return this.clawBreakdownEnabled === true;
+  }
+
+  isClawBreakdownTutorialBlockedNow() {
+    return (
+      this.sceneTransitioning
+      || this.isGameOver
+      || this.levelComplete
+      || this.levelIntroActive
+      || this.isDraftActive
+      || this.droneActive
+      || this.droneTutorialActive
+      || this.beetleTutorialActive
+      || this.steamTutorialActive
+      || this.laneSwapActive
+    );
+  }
+
+  tryStartPendingClawBreakdownTutorial() {
+    if (!this.shouldShowClawBreakdownTutorial() || this.isClawBreakdownTutorialBlockedNow()) {
+      return false;
+    }
+
+    const pendingLane = this.lanesById?.[this.clawBreakTutorialPendingLaneId] || null;
+    if (!pendingLane?.clawOverheated) {
+      this.clawBreakTutorialPendingLaneId = null;
+      return false;
+    }
+
+    return this.startClawBreakdownTutorial(pendingLane);
+  }
+
+  loadClawBreakdownTutorialPreference() {
+    if (this.clawBreakTutorialPreferenceLoaded) {
+      return;
+    }
+
+    this.clawBreakTutorialPreferenceLoaded = true;
+    this.clawBreakTutorialDoNotShowAgain = false;
+
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(CLAW_BREAKDOWN_TUTORIAL_DISABLE_STORAGE_KEY);
+      this.clawBreakTutorialDoNotShowAgain = raw === '1' || raw === 'true';
+    } catch {
+      this.clawBreakTutorialDoNotShowAgain = false;
+    }
+  }
+
+  setClawBreakdownTutorialDisabled(disabled) {
+    this.clawBreakTutorialPreferenceLoaded = true;
+    this.clawBreakTutorialDoNotShowAgain = disabled === true;
+
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    try {
+      if (this.clawBreakTutorialDoNotShowAgain) {
+        window.localStorage.setItem(CLAW_BREAKDOWN_TUTORIAL_DISABLE_STORAGE_KEY, '1');
+      } else {
+        window.localStorage.removeItem(CLAW_BREAKDOWN_TUTORIAL_DISABLE_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage write failures.
+    }
+  }
+
+  setSteamHazardTutorialDisabled(disabled) {
+    this.steamTutorialPreferenceLoaded = true;
+    this.steamTutorialDoNotShowAgain = disabled === true;
+
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    try {
+      if (this.steamTutorialDoNotShowAgain) {
+        window.localStorage.setItem(STEAM_HAZARD_TUTORIAL_DISABLE_STORAGE_KEY, '1');
+      } else {
+        window.localStorage.removeItem(STEAM_HAZARD_TUTORIAL_DISABLE_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage write failures.
+    }
+  }
+
+  cleanupClawBreakWarning({ resumeGameplay = false } = {}) {
+    const wasActive = this.clawBreakTutorialActive;
+
+    if (this.clawBreakTutorialButtonUnlockEvent) {
+      this.clawBreakTutorialButtonUnlockEvent.remove(false);
+      this.clawBreakTutorialButtonUnlockEvent = null;
+    }
+
+    if (this.clawBreakTutorialPreviewState) {
+      const { animatedTargets = [], animatedTweens = [] } = this.clawBreakTutorialPreviewState;
+      animatedTweens.forEach((tween) => {
+        tween?.remove?.();
+      });
+
+      if (animatedTargets.length > 0) {
+        this.tweens.killTweensOf(animatedTargets);
+      }
+    }
+    this.clawBreakTutorialPreviewState = null;
+
+    if (this.clawBreakTutorialOverlay?.active) {
+      this.tweens.killTweensOf(this.clawBreakTutorialOverlay);
+      this.clawBreakTutorialOverlay.destroy(true);
+    }
+    this.clawBreakTutorialOverlay = null;
+    this.clawBreakTutorialActive = false;
+    this.clawBreakTutorialPendingLaneId = null;
+
     if (this.clawBreakWarningText?.active) {
       this.tweens.killTweensOf(this.clawBreakWarningText);
       this.clawBreakWarningText.destroy();
@@ -6568,100 +6731,512 @@ export default class GameScene extends Phaser.Scene {
       this.clawBreakWarningTint.destroy();
     }
     this.clawBreakWarningTint = null;
+
+    if (wasActive) {
+      this.pauseTransitionLock = false;
+    }
+
+    if (
+      resumeGameplay
+      && !this.isGameOver
+      && !this.levelComplete
+      && !this.sceneTransitioning
+      && !this.isDraftActive
+      && !this.levelIntroActive
+      && !this.droneTutorialActive
+      && !this.beetleTutorialActive
+      && !this.steamTutorialActive
+      && !this.laneSwapActive
+    ) {
+      this.isPaused = false;
+    }
   }
 
   showClawBreakdownWarning(lane) {
-    this.cleanupClawBreakWarning();
+    this.clawBreakTutorialPendingLaneId = lane?.id ?? null;
+    this.startClawBreakdownTutorial(lane);
+  }
 
-    const camera = this.cameras.main;
-    const centerX = camera?.centerX ?? 640;
-    const centerY = camera?.centerY ?? 360;
-    const laneLabel = String(lane?.id || 'lane').replace(/_/g, ' ').toUpperCase();
+  startClawBreakdownTutorial(lane) {
+    if (this.clawBreakTutorialActive || !this.shouldShowClawBreakdownTutorial()) {
+      return false;
+    }
 
-    const warningText = this.add
-      .text(centerX, centerY - 16, `${laneLabel} CLAW DAMAGED`, {
+    if (this.isClawBreakdownTutorialBlockedNow()) {
+      return false;
+    }
+
+    const activeLane = lane?.clawOverheated
+      ? lane
+      : (this.lanesById?.[this.clawBreakTutorialPendingLaneId] || null);
+    if (!activeLane?.clawOverheated) {
+      this.clawBreakTutorialPendingLaneId = null;
+      return false;
+    }
+
+    this.clawBreakTutorialShownThisRun = true;
+    this.clawBreakTutorialActive = true;
+    this.clawBreakTutorialPendingLaneId = activeLane.id;
+
+    this.abortActiveDrag();
+    this.isPaused = true;
+    this.pauseTransitionLock = true;
+
+    const overlay = this.add.container(0, 0).setDepth(368);
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x0b1220, 0.72).setInteractive();
+    scrim.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+    });
+
+    const softBlurLayer = this.add
+      .rectangle(640, 360, 1280, 720, 0xe2e8f0, 0.05)
+      .setBlendMode(Phaser.BlendModes.SCREEN);
+
+    const panelX = 640;
+    const panelY = 362;
+    const panelWidth = 892;
+    const panelHeight = 562;
+
+    const laneLabel = String(activeLane?.id || 'lane').replace(/_/g, ' ').toUpperCase();
+    const panelShadow = this.add.rectangle(panelX, panelY + 9, panelWidth, panelHeight, 0x020617, 0.56);
+    const panel = this.add
+      .rectangle(panelX, panelY, panelWidth, panelHeight, 0x4a2012, 0.97)
+      .setStrokeStyle(2, 0xf0bd85, 0.95);
+    const panelTopStrip = this.add.rectangle(panelX, panelY - 236, panelWidth - 74, 40, 0xffffff, 0.14);
+
+    const title = this.add
+      .text(panelX, panelY - 234, 'CLAW OVERHEAT ALERT', {
         fontFamily: GAME_DISPLAY_FONT,
-        fontSize: '40px',
-        color: '#fef2f2',
-        stroke: '#450a0a',
-        strokeThickness: 6,
+        fontSize: '44px',
+        color: '#fff1e6',
         align: 'center'
       })
       .setOrigin(0.5)
-      .setDepth(332)
-      .setAlpha(0);
+      .setLetterSpacing(1.2)
+      .setShadow(0, 3, '#000000', 8);
 
-    const warningSubText = this.add
-      .text(centerX, centerY + 36, 'DRONE REPAIR IN PROGRESS', {
+    const laneCaption = this.add
+      .text(panelX, panelY - 198, `${laneLabel} just broke down.`, {
         fontFamily: GAME_UI_FONT,
-        fontSize: '25px',
-        color: '#bae6fd',
-        stroke: '#082f49',
-        strokeThickness: 4,
+        fontSize: '24px',
+        color: '#fde68a',
         align: 'center'
       })
       .setOrigin(0.5)
-      .setDepth(332)
-      .setAlpha(0);
+      .setShadow(0, 2, '#000000', 6);
 
-    const warningTint = this.add
-      .rectangle(centerX, centerY, camera?.width ?? 1280, camera?.height ?? 720, 0x991b1b, 1)
-      .setDepth(249)
-      .setAlpha(0);
+    const previewY = 308;
+    const previewShadow = this.add.rectangle(640, previewY + 6, 760, 176, 0x020617, 0.48);
+    const previewFrame = this.add
+      .rectangle(640, previewY, 760, 176, 0x1f2937, 0.94)
+      .setStrokeStyle(2, 0xf0bd85, 0.72);
 
-    this.clawBreakWarningText = warningText;
-    this.clawBreakWarningSubText = warningSubText;
-    this.clawBreakWarningTint = warningTint;
+    const previewContainer = this.add.container(640, previewY).setDepth(372);
+    const belt = this.add.rectangle(0, 18, 706, 36, 0x3f3f46, 0.98).setStrokeStyle(2, 0x0f172a, 0.7);
+    const stripes = [];
+    for (let stripeX = -334; stripeX <= 334; stripeX += 48) {
+      stripes.push(this.add.rectangle(stripeX, 18, 24, 4, 0xa1a1aa, 0.34));
+    }
 
-    const fadeInMs = 180;
-    const fadeOutMs = 250;
-    const holdMs = Math.max(0, CLAW_BREAKDOWN_WARNING_DURATION_MS - fadeInMs - fadeOutMs);
+    const stageX = {
+      normal: -236,
+      overheated: 0,
+      repairing: 236
+    };
 
-    this.tweens.add({
-      targets: [warningText, warningSubText],
-      alpha: 0.95,
-      duration: fadeInMs,
-      ease: 'Sine.Out'
+    const createPreviewClaw = (x, { baseColor, armColor, jawColor, alpha = 1 }) => {
+      const clawContainer = this.add.container(x, 10).setAlpha(alpha);
+      const clawGraphics = this.add.graphics();
+      clawGraphics.lineStyle(4, armColor, 1);
+      clawGraphics.lineBetween(0, 0, -24, 0);
+      clawGraphics.lineStyle(4, jawColor, 1);
+      clawGraphics.lineBetween(-24, 0, -38, -10);
+      clawGraphics.lineBetween(-24, 0, -38, 10);
+      const clawBase = this.add.circle(0, 0, 10, baseColor, 1).setStrokeStyle(2, 0x0f172a, 0.95);
+      clawContainer.add([clawGraphics, clawBase]);
+      return { container: clawContainer, graphics: clawGraphics, base: clawBase };
+    };
+
+    const normalClaw = createPreviewClaw(stageX.normal, {
+      baseColor: 0x34d399,
+      armColor: 0xfef3c7,
+      jawColor: 0x22c55e,
+      alpha: 1
     });
-
-    this.tweens.add({
-      targets: warningTint,
-      alpha: 0.1,
-      duration: fadeInMs,
-      ease: 'Sine.Out'
+    const overheatedClaw = createPreviewClaw(stageX.overheated, {
+      baseColor: 0xf97316,
+      armColor: 0xfdba74,
+      jawColor: 0xea580c,
+      alpha: 0.58
     });
+    overheatedClaw.container.setAngle(8);
 
-    this.time.delayedCall(fadeInMs + holdMs, () => {
-      this.tweens.add({
-        targets: [warningText, warningSubText],
-        alpha: 0,
-        duration: fadeOutMs,
-        ease: 'Sine.In',
-        onComplete: () => {
-          if (this.clawBreakWarningText === warningText) {
-            this.clawBreakWarningText = null;
-          }
-          if (this.clawBreakWarningSubText === warningSubText) {
-            this.clawBreakWarningSubText = null;
-          }
-          warningText.destroy();
-          warningSubText.destroy();
-        }
+    const repairingClaw = createPreviewClaw(stageX.repairing, {
+      baseColor: 0x38bdf8,
+      armColor: 0xdbeafe,
+      jawColor: 0x0ea5e9,
+      alpha: 0.9
+    });
+    repairingClaw.container.setAngle(-4);
+
+    const smokeOne = this.add.circle(stageX.overheated - 12, -38, 8, 0xcbd5e1, 0.48);
+    const smokeTwo = this.add.circle(stageX.overheated + 2, -48, 6, 0xe2e8f0, 0.42);
+    const smokeThree = this.add.circle(stageX.overheated + 14, -36, 7, 0x94a3b8, 0.38);
+
+    const repairDrone = this.add.container(stageX.repairing + 56, -24);
+    const droneShadow = this.add.ellipse(0, 13, 34, 11, 0x020617, 0.24);
+    const droneBody = this.add.rectangle(0, 0, 26, 14, 0x475569, 1).setStrokeStyle(2, 0x93c5fd, 0.95);
+    const droneLight = this.add.rectangle(0, 0, 8, 4, 0x22d3ee, 0.9);
+    const droneRotor = this.add.container(0, -10);
+    const droneBladeA = this.add.rectangle(0, 0, 24, 2, 0xe2e8f0, 0.95);
+    const droneBladeB = this.add.rectangle(0, 0, 24, 2, 0xe2e8f0, 0.95).setAngle(90);
+    droneRotor.add([droneBladeA, droneBladeB]);
+    repairDrone.add([droneShadow, droneBody, droneLight, droneRotor]);
+
+    const normalLabel = this.add
+      .text(stageX.normal, -68, 'WORKING', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#bbf7d0'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+    const overheatedLabel = this.add
+      .text(stageX.overheated, -68, 'OVERHEATED', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#fdba74'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+    const repairLabel = this.add
+      .text(stageX.repairing, -68, 'REPAIRING', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#93c5fd'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+
+    const arrowOne = this.add
+      .text(-118, 10, '>', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '44px',
+        color: '#fdba74'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+    const arrowTwo = this.add
+      .text(118, 10, '>', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '44px',
+        color: '#93c5fd'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+
+    previewContainer.add([
+      belt,
+      ...stripes,
+      normalClaw.container,
+      overheatedClaw.container,
+      repairingClaw.container,
+      smokeOne,
+      smokeTwo,
+      smokeThree,
+      repairDrone,
+      normalLabel,
+      overheatedLabel,
+      repairLabel,
+      arrowOne,
+      arrowTwo
+    ]);
+
+    const layoutInlineTexts = (parts, centerX, y) => {
+      const totalWidth = parts.reduce((sum, part) => sum + part.width, 0);
+      let cursor = centerX - totalWidth * 0.5;
+      parts.forEach((part) => {
+        part.setOrigin(0, 0.5);
+        part.setPosition(cursor, y);
+        cursor += part.width;
       });
+    };
 
-      this.tweens.add({
-        targets: warningTint,
-        alpha: 0,
-        duration: fadeOutMs,
-        ease: 'Sine.In',
-        onComplete: () => {
-          if (this.clawBreakWarningTint === warningTint) {
-            this.clawBreakWarningTint = null;
-          }
-          warningTint.destroy();
-        }
-      });
+    const lineOnePrefix = this.add.text(0, 0, 'CLAWS will ', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '30px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    const overheatWord = this.add.text(0, 0, 'OVERHEAT', {
+      fontFamily: GAME_DISPLAY_FONT,
+      fontSize: '34px',
+      color: '#fb923c'
+    }).setShadow(0, 2, '#000000', 5);
+    const lineOneSuffix = this.add.text(0, 0, ' and smoke up.', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '30px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    layoutInlineTexts([lineOnePrefix, overheatWord, lineOneSuffix], 640, 444);
+
+    const lineTwoPrefix = this.add.text(0, 0, 'Repair drones will come and ', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '28px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    const fixWord = this.add.text(0, 0, 'FIX', {
+      fontFamily: GAME_DISPLAY_FONT,
+      fontSize: '34px',
+      color: '#4ade80'
+    }).setShadow(0, 2, '#000000', 5);
+    const lineTwoSuffix = this.add.text(0, 0, ' after a short time.', {
+      fontFamily: GAME_UI_FONT,
+      fontSize: '28px',
+      color: '#f8fafc'
+    }).setShadow(0, 2, '#000000', 5);
+    layoutInlineTexts([lineTwoPrefix, fixWord, lineTwoSuffix], 640, 480);
+
+    const stripeTween = this.tweens.add({
+      targets: stripes,
+      x: '+=22',
+      duration: 360,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
     });
+    const normalPulseTween = this.tweens.add({
+      targets: normalClaw.container,
+      scaleX: 1.07,
+      scaleY: 1.07,
+      duration: 430,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const overheatWobbleTween = this.tweens.add({
+      targets: overheatedClaw.container,
+      angle: 16,
+      duration: 250,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const smokeOneTween = this.tweens.add({
+      targets: smokeOne,
+      y: smokeOne.y - 10,
+      alpha: 0.16,
+      scaleX: 1.24,
+      scaleY: 1.24,
+      duration: 760,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const smokeTwoTween = this.tweens.add({
+      targets: smokeTwo,
+      y: smokeTwo.y - 12,
+      alpha: 0.12,
+      scaleX: 1.28,
+      scaleY: 1.28,
+      duration: 720,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const smokeThreeTween = this.tweens.add({
+      targets: smokeThree,
+      y: smokeThree.y - 8,
+      alpha: 0.14,
+      scaleX: 1.22,
+      scaleY: 1.22,
+      duration: 700,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const droneRotorTween = this.tweens.add({
+      targets: droneRotor,
+      angle: 360,
+      duration: 130,
+      repeat: -1,
+      ease: 'Linear'
+    });
+    const droneHoverTween = this.tweens.add({
+      targets: repairDrone,
+      y: repairDrone.y - 3,
+      duration: 390,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const droneAssistTween = this.tweens.add({
+      targets: repairDrone,
+      x: repairDrone.x - 18,
+      duration: 520,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const repairPulseTween = this.tweens.add({
+      targets: repairingClaw.container,
+      alpha: 0.62,
+      duration: 340,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const overheatWordTween = this.tweens.add({
+      targets: overheatWord,
+      scaleX: 1.08,
+      scaleY: 1.08,
+      duration: 260,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const fixWordTween = this.tweens.add({
+      targets: fixWord,
+      scaleX: 1.08,
+      scaleY: 1.08,
+      duration: 320,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+
+    let doNotShowAgain = false;
+    const checkboxContainer = this.add.container(640, 532).setDepth(374);
+    const checkboxBody = this.add.rectangle(-96, 0, 22, 22, 0x0f172a, 0.95).setStrokeStyle(2, 0x94a3b8, 0.95);
+    const checkboxFill = this.add.rectangle(-96, 0, 12, 12, 0x86efac, 1).setVisible(false);
+    const checkboxLabel = this.add
+      .text(16, 0, 'Do not show again', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#dbeafe',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 3);
+    const checkboxHit = this.add.zone(0, 0, 300, 34).setInteractive({ useHandCursor: true });
+
+    const syncCheckboxVisual = () => {
+      checkboxFill.setVisible(doNotShowAgain);
+      checkboxBody.setStrokeStyle(2, doNotShowAgain ? 0x86efac : 0x94a3b8, 0.95);
+      checkboxLabel.setColor(doNotShowAgain ? '#bbf7d0' : '#dbeafe');
+    };
+
+    checkboxHit.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+      doNotShowAgain = !doNotShowAgain;
+      syncCheckboxVisual();
+    });
+
+    checkboxContainer.add([checkboxBody, checkboxFill, checkboxLabel, checkboxHit]);
+    syncCheckboxVisual();
+
+    const disabledButtonStyle = {
+      bodyColor: 0x6b7280,
+      bodyHoverColor: 0x6b7280,
+      glossAlpha: 0.08,
+      textColor: '#e5e7eb',
+      textShadowColor: '#1f2937'
+    };
+    const enabledButtonStyle = {
+      bodyColor: 0x16a34a,
+      bodyHoverColor: 0x22c55e,
+      glossAlpha: 0.14,
+      textColor: '#f0fdf4',
+      textShadowColor: '#064e3b'
+    };
+
+    const acknowledgeTutorial = () => {
+      this.setClawBreakdownTutorialDisabled(doNotShowAgain);
+      this.pauseTransitionLock = false;
+      this.cleanupClawBreakWarning({ resumeGameplay: true });
+    };
+
+    overlay.add([
+      scrim,
+      softBlurLayer,
+      panelShadow,
+      panel,
+      panelTopStrip,
+      title,
+      laneCaption,
+      previewShadow,
+      previewFrame,
+      previewContainer,
+      lineOnePrefix,
+      overheatWord,
+      lineOneSuffix,
+      lineTwoPrefix,
+      fixWord,
+      lineTwoSuffix,
+      checkboxContainer
+    ]);
+
+    let understoodButton = this.createPauseMenuEntry(
+      overlay,
+      'Understood',
+      596,
+      0x9ca3af,
+      acknowledgeTutorial,
+      disabledButtonStyle
+    );
+
+    this.clawBreakTutorialButtonUnlockEvent = this.time.delayedCall(CLAW_BREAKDOWN_TUTORIAL_BUTTON_LOCK_MS, () => {
+      this.clawBreakTutorialButtonUnlockEvent = null;
+      if (!this.clawBreakTutorialActive || this.clawBreakTutorialOverlay !== overlay || !overlay.active) {
+        return;
+      }
+
+      if (understoodButton?.active) {
+        understoodButton.destroy(true);
+      }
+
+      this.pauseTransitionLock = false;
+      understoodButton = this.createPauseMenuEntry(
+        overlay,
+        'Understood',
+        596,
+        0x86efac,
+        acknowledgeTutorial,
+        enabledButtonStyle
+      );
+    });
+
+    this.clawBreakTutorialOverlay = overlay;
+    this.clawBreakTutorialPreviewState = {
+      animatedTargets: [
+        ...stripes,
+        normalClaw.container,
+        overheatedClaw.container,
+        repairingClaw.container,
+        smokeOne,
+        smokeTwo,
+        smokeThree,
+        repairDrone,
+        droneRotor,
+        overheatWord,
+        fixWord
+      ],
+      animatedTweens: [
+        stripeTween,
+        normalPulseTween,
+        overheatWobbleTween,
+        smokeOneTween,
+        smokeTwoTween,
+        smokeThreeTween,
+        droneRotorTween,
+        droneHoverTween,
+        droneAssistTween,
+        repairPulseTween,
+        overheatWordTween,
+        fixWordTween
+      ]
+    };
+
+    return true;
   }
 
   triggerLaneClawOverheat(lane) {
@@ -6770,6 +7345,10 @@ export default class GameScene extends Phaser.Scene {
   updateClawBreakdowns(deltaMs) {
     if (!this.clawBreakdownEnabled || deltaMs <= 0) {
       return;
+    }
+
+    if (this.clawBreakTutorialPendingLaneId && !this.clawBreakTutorialActive) {
+      this.tryStartPendingClawBreakdownTutorial();
     }
 
     for (const lane of Object.values(this.lanesById)) {
@@ -7060,6 +7639,7 @@ export default class GameScene extends Phaser.Scene {
       && !this.isDraftActive
       && !this.levelIntroActive
       && !this.droneTutorialActive
+      && !this.steamTutorialActive
       && !this.laneSwapActive
     ) {
       this.isPaused = false;
@@ -7078,6 +7658,7 @@ export default class GameScene extends Phaser.Scene {
       || this.levelIntroActive
       || this.isDraftActive
       || this.droneTutorialActive
+      || this.steamTutorialActive
       || this.laneSwapActive
     ) {
       return false;
@@ -7376,6 +7957,10 @@ export default class GameScene extends Phaser.Scene {
   }
 
   isDroneSabotageLevelEnabled() {
+    if (this.levelId === DEBUG_LEVEL_ID) {
+      return false;
+    }
+
     if (this.levelMode === 'endless') {
       return true;
     }
@@ -7385,7 +7970,11 @@ export default class GameScene extends Phaser.Scene {
     }
 
     const levelIndex = Number(this.levelConfig?.index);
-    return Number.isFinite(levelIndex) && levelIndex >= DRONE_SABOTAGE_INTRO_LEVEL_INDEX;
+    return (
+      Number.isFinite(levelIndex)
+      && levelIndex >= DRONE_SABOTAGE_INTRO_LEVEL_INDEX
+      && levelIndex < STEAM_HAZARD_INTRO_LEVEL_INDEX
+    );
   }
 
   shouldShowDroneIncidentTutorial() {
@@ -7495,6 +8084,7 @@ export default class GameScene extends Phaser.Scene {
       && !this.sceneTransitioning
       && !this.isDraftActive
       && !this.levelIntroActive
+      && !this.steamTutorialActive
     ) {
       this.isPaused = false;
     }
@@ -7505,7 +8095,14 @@ export default class GameScene extends Phaser.Scene {
       return false;
     }
 
-    if (this.sceneTransitioning || this.isGameOver || this.levelComplete || this.levelIntroActive || this.isDraftActive) {
+    if (
+      this.sceneTransitioning
+      || this.isGameOver
+      || this.levelComplete
+      || this.levelIntroActive
+      || this.isDraftActive
+      || this.steamTutorialActive
+    ) {
       return false;
     }
 
@@ -7961,8 +8558,31 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
+  shouldSuspendDroneSabotage() {
+    return (
+      this.isPaused
+      || this.isDraftActive
+      || this.isGameOver
+      || this.levelComplete
+      || this.sceneTransitioning
+      || this.levelIntroActive
+    );
+  }
+
   updateDroneSabotage(deltaMs) {
-    if (!this.isDroneSabotageLevelEnabled() || this.droneActive || this.laneSwapActive || deltaMs <= 0) {
+    if (!this.isDroneSabotageLevelEnabled() || this.laneSwapActive || deltaMs <= 0) {
+      return;
+    }
+
+    if (this.shouldSuspendDroneSabotage()) {
+      if (this.droneActive) {
+        this.cleanupDroneSabotage(true);
+        this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+      }
+      return;
+    }
+
+    if (this.droneActive) {
       return;
     }
 
@@ -8457,7 +9077,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   startDroneSabotageRun(targetItemId, plannedDrop) {
-    if (this.droneActive) {
+    if (this.droneActive || this.shouldSuspendDroneSabotage()) {
       return;
     }
 
@@ -8473,8 +9093,8 @@ export default class GameScene extends Phaser.Scene {
         return;
       }
 
-      if (this.isGameOver || this.levelComplete || this.sceneTransitioning) {
-        this.droneActive = false;
+      if (this.shouldSuspendDroneSabotage()) {
+        this.cleanupDroneSabotage(true);
         this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
         return;
       }
@@ -8516,6 +9136,12 @@ export default class GameScene extends Phaser.Scene {
             return;
           }
 
+          if (this.shouldSuspendDroneSabotage()) {
+            this.cleanupDroneSabotage(true);
+            this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+            return;
+          }
+
           const latestItem = this.getItemById(pickupItem.id);
           if (!this.isDroneSabotagePickupCandidate(latestItem)) {
             if (!hasRetried) {
@@ -8544,6 +9170,12 @@ export default class GameScene extends Phaser.Scene {
               return;
             }
 
+            if (this.shouldSuspendDroneSabotage()) {
+              this.cleanupDroneSabotage(true);
+              this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+              return;
+            }
+
             const carried = this.getItemById(this.droneCarryItemId);
             if (carried) {
               runtimeDropPlan = this.resolveDroneSabotageDropPlan(carried, runtimeDropPlan) || runtimeDropPlan;
@@ -8559,6 +9191,12 @@ export default class GameScene extends Phaser.Scene {
                 return;
               }
 
+              if (this.shouldSuspendDroneSabotage()) {
+                this.cleanupDroneSabotage(true);
+                this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
+                return;
+              }
+
               const carriedAtDrop = this.getItemById(this.droneCarryItemId);
               if (carriedAtDrop) {
                 this.releaseItemFromDrone(carriedAtDrop, runtimeDropPlan);
@@ -8569,6 +9207,12 @@ export default class GameScene extends Phaser.Scene {
 
               this.time.delayedCall(DRONE_DROP_HOLD_MS, () => {
                 if (runToken !== this.droneRunToken || !this.droneActive) {
+                  return;
+                }
+
+                if (this.shouldSuspendDroneSabotage()) {
+                  this.cleanupDroneSabotage(true);
+                  this.resetDroneSabotageTimer(DRONE_SABOTAGE_RETRY_MIN_MS, DRONE_SABOTAGE_RETRY_MAX_MS);
                   return;
                 }
 
@@ -8602,6 +9246,10 @@ export default class GameScene extends Phaser.Scene {
   }
 
   isLaneSwapIncidentEnabled() {
+    if (this.levelId === DEBUG_LEVEL_ID) {
+      return false;
+    }
+
     if (this.levelMode === 'endless') {
       return true;
     }
@@ -9298,6 +9946,608 @@ export default class GameScene extends Phaser.Scene {
     if (!this.isGameOver && !this.levelComplete && !this.sceneTransitioning && !this.isDraftActive) {
       this.isPaused = false;
     }
+  }
+
+  // ================== STEAM HAZARD ==================
+
+  isSteamHazardLevelEnabled() {
+    if (this.levelId === DEBUG_LEVEL_ID) {
+      return true;
+    }
+
+    if (this.levelMode !== 'campaign') {
+      return false;
+    }
+
+    const levelIndex = Number(this.levelConfig?.index);
+    return Number.isFinite(levelIndex) && levelIndex >= STEAM_HAZARD_INTRO_LEVEL_INDEX;
+  }
+
+  shouldSuspendSteamHazard() {
+    return (
+      this.isPaused
+      || this.isDraftActive
+      || this.isGameOver
+      || this.levelComplete
+      || this.sceneTransitioning
+      || this.levelIntroActive
+    );
+  }
+
+  getSteamHazardObscureWorldBounds(lane) {
+    if (!lane) {
+      return null;
+    }
+
+    const spacing = this.getActiveSideSpacing();
+    const clearLaneSpan = STEAM_HAZARD_CHEST_CLEAR_SLOTS * spacing;
+    const clearStartLanePos = Math.max(0, lane.length - clearLaneSpan);
+    const xIntake = lane.intakeX;
+    const xClearEdge = lane.intakeX + lane.direction * clearStartLanePos;
+    const fogLeft = Math.min(xIntake, xClearEdge);
+    const fogRight = Math.max(xIntake, xClearEdge);
+    const width = Math.max(28, fogRight - fogLeft);
+    const centerX = (fogLeft + fogRight) * 0.5;
+    const padY = 16;
+    const height = SIDE_BELT_HEIGHT + padY * 2;
+
+    return { centerX, laneY: lane.y, width, height };
+  }
+
+  updateSteamHazard(deltaMs) {
+    if (!this.isSteamHazardLevelEnabled() || this.laneSwapActive || deltaMs <= 0) {
+      return;
+    }
+
+    if (this.shouldSuspendSteamHazard()) {
+      if (this.steamCloudActive) {
+        this.cleanupSteamHazard();
+        this.resetSteamHazardTimer(STEAM_HAZARD_RETRY_MIN_MS, STEAM_HAZARD_RETRY_MAX_MS);
+      }
+      return;
+    }
+
+    if (this.steamCloudActive) {
+      return;
+    }
+
+    this.steamHazardTimerMs -= deltaMs;
+    if (this.steamHazardTimerMs > 0) {
+      return;
+    }
+
+    const targetLane = this.pickSteamTargetLane();
+    if (!targetLane) {
+      this.resetSteamHazardTimer(STEAM_HAZARD_RETRY_MIN_MS, STEAM_HAZARD_RETRY_MAX_MS);
+      return;
+    }
+
+    if (this.shouldShowSteamHazardTutorial()) {
+      const startedTutorial = this.startSteamHazardTutorial(targetLane);
+      if (startedTutorial) {
+        return;
+      }
+    }
+
+    this.startSteamCloud(targetLane);
+  }
+
+  shouldShowSteamHazardTutorial() {
+    this.loadSteamHazardTutorialPreference();
+    if (this.steamTutorialDoNotShowAgain) {
+      return false;
+    }
+
+    if (this.steamTutorialShownThisRun || this.steamTutorialActive) {
+      return false;
+    }
+
+    if (this.levelMode === 'endless') {
+      return true;
+    }
+
+    if (this.levelMode !== 'campaign') {
+      return false;
+    }
+
+    const levelIndex = Number(this.levelConfig?.index);
+    return Number.isFinite(levelIndex) && levelIndex === STEAM_HAZARD_INTRO_LEVEL_INDEX;
+  }
+
+  loadSteamHazardTutorialPreference() {
+    if (this.steamTutorialPreferenceLoaded) {
+      return;
+    }
+
+    this.steamTutorialPreferenceLoaded = true;
+    this.steamTutorialDoNotShowAgain = false;
+
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(STEAM_HAZARD_TUTORIAL_DISABLE_STORAGE_KEY);
+      this.steamTutorialDoNotShowAgain = raw === '1' || raw === 'true';
+    } catch {
+      // Ignore storage read failures.
+    }
+  }
+
+  acknowledgeSteamHazardTutorial() {
+    const pendingLaneId = this.steamTutorialPendingLaneId;
+    this.cleanupSteamHazardTutorial({ resumeGameplay: true });
+
+    if (this.sceneTransitioning || this.isGameOver || this.levelComplete) {
+      return;
+    }
+
+    const lane = this.lanesById[pendingLaneId];
+    if (lane) {
+      this.startSteamCloud(lane);
+      return;
+    }
+
+    this.resetSteamHazardTimer(STEAM_HAZARD_RETRY_MIN_MS, STEAM_HAZARD_RETRY_MAX_MS);
+  }
+
+  cleanupSteamHazardTutorial({ resumeGameplay = false } = {}) {
+    const wasActive = this.steamTutorialActive;
+
+    if (this.steamTutorialButtonUnlockEvent) {
+      this.steamTutorialButtonUnlockEvent.remove(false);
+      this.steamTutorialButtonUnlockEvent = null;
+    }
+
+    if (this.steamTutorialPreviewState) {
+      const { animatedTargets = [], animatedTweens = [] } = this.steamTutorialPreviewState;
+      animatedTweens.forEach((tween) => {
+        tween?.remove?.();
+      });
+
+      if (animatedTargets.length > 0) {
+        this.tweens.killTweensOf(animatedTargets);
+      }
+    }
+    this.steamTutorialPreviewState = null;
+
+    if (this.steamTutorialOverlay?.active) {
+      this.tweens.killTweensOf(this.steamTutorialOverlay);
+      this.steamTutorialOverlay.destroy(true);
+    }
+    this.steamTutorialOverlay = null;
+    this.steamTutorialPendingLaneId = null;
+    this.steamTutorialActive = false;
+
+    if (wasActive) {
+      this.pauseTransitionLock = false;
+    }
+
+    if (
+      resumeGameplay
+      && !this.isGameOver
+      && !this.levelComplete
+      && !this.sceneTransitioning
+      && !this.isDraftActive
+      && !this.levelIntroActive
+      && !this.droneTutorialActive
+      && !this.beetleTutorialActive
+      && !this.laneSwapActive
+    ) {
+      this.isPaused = false;
+    }
+  }
+
+  startSteamHazardTutorial(targetLane) {
+    if (this.steamTutorialActive || !this.shouldShowSteamHazardTutorial() || !targetLane) {
+      return false;
+    }
+
+    if (
+      this.sceneTransitioning
+      || this.isGameOver
+      || this.levelComplete
+      || this.levelIntroActive
+      || this.isDraftActive
+      || this.droneTutorialActive
+      || this.beetleTutorialActive
+      || this.droneActive
+      || this.laneSwapActive
+    ) {
+      return false;
+    }
+
+    this.steamTutorialShownThisRun = true;
+    this.steamTutorialActive = true;
+    this.steamTutorialPendingLaneId = targetLane.id;
+
+    this.abortActiveDrag();
+    this.isPaused = true;
+    this.pauseTransitionLock = true;
+
+    const overlay = this.add.container(0, 0).setDepth(368);
+    const scrim = this.add.rectangle(640, 360, 1280, 720, 0x0b1220, 0.72).setInteractive();
+    scrim.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+    });
+
+    const softBlurLayer = this.add
+      .rectangle(640, 360, 1280, 720, 0xe2e8f0, 0.05)
+      .setBlendMode(Phaser.BlendModes.SCREEN);
+
+    const panelX = 640;
+    const panelY = 362;
+    const panelWidth = 892;
+    const panelHeight = 518;
+
+    const panelShadow = this.add.rectangle(panelX, panelY + 9, panelWidth, panelHeight, 0x020617, 0.56);
+    const panel = this.add
+      .rectangle(panelX, panelY, panelWidth, panelHeight, 0x4a2012, 0.97)
+      .setStrokeStyle(2, 0xf0bd85, 0.95);
+    const panelTopStrip = this.add.rectangle(panelX, panelY - 219, panelWidth - 74, 40, 0xffffff, 0.14);
+
+    const title = this.add
+      .text(panelX, panelY - 218, 'STEAM BURST', {
+        fontFamily: GAME_DISPLAY_FONT,
+        fontSize: '46px',
+        color: '#fff1e6',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setLetterSpacing(1.1)
+      .setShadow(0, 3, '#000000', 8);
+
+    const subtitle = this.add
+      .text(panelX, panelY - 182, 'Keep an eye on the intake — chest claws stay readable.', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '22px',
+        color: '#fde68a',
+        align: 'center',
+        wordWrap: { width: 780 }
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 6);
+
+    const previewY = 302;
+    const previewShadow = this.add.rectangle(640, previewY + 6, 760, 166, 0x020617, 0.48);
+    const previewFrame = this.add
+      .rectangle(640, previewY, 760, 166, 0x1f2937, 0.94)
+      .setStrokeStyle(2, 0xf0bd85, 0.72);
+
+    const previewContainer = this.add.container(640, previewY).setDepth(372);
+    const belt = this.add.rectangle(0, 14, 706, 34, 0x3f3f46, 0.98).setStrokeStyle(2, 0x0f172a, 0.7);
+    const stripes = [];
+    for (let stripeX = -332; stripeX <= 332; stripeX += 46) {
+      stripes.push(this.add.rectangle(stripeX, 14, 22, 4, 0xa1a1aa, 0.34));
+    }
+
+    const steamMask = this.add
+      .rectangle(-118, 14, 404, 54, 0xe2e8f0, 0.38)
+      .setBlendMode(Phaser.BlendModes.SCREEN);
+    const steamDots = [-268, -220, -176, -132, -88].map((x) =>
+      this.add.circle(x, 8, Phaser.Math.Between(11, 18), 0xf8fafc, 0.55)
+    );
+    const clearChip = this.add
+      .rectangle(248, 14, 168, 42, 0x0f172a, 0.12)
+      .setStrokeStyle(2, 0x86efac, 0.55);
+    const clawLine = this.add.graphics();
+    clawLine.lineStyle(3, 0xfde68a, 0.95);
+    clawLine.lineBetween(312, 6, 296, 18);
+    clawLine.lineBetween(296, 18, 312, 24);
+    const clearLabel = this.add
+      .text(248, -52, 'CLEAR BY CLAWS', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#bbf7d0',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 4);
+
+    previewContainer.add([belt, ...stripes, steamMask, ...steamDots, clearChip, clawLine, clearLabel]);
+
+    const stripeTween = this.tweens.add({
+      targets: stripes,
+      x: '+=20',
+      duration: 360,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+    const steamPulse = this.tweens.add({
+      targets: steamDots,
+      alpha: { from: 0.35, to: 0.9 },
+      scale: { from: 0.92, to: 1.18 },
+      duration: 540,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut',
+      stagger: 90
+    });
+    const steamMaskTween = this.tweens.add({
+      targets: steamMask,
+      alpha: { from: 0.22, to: 0.52 },
+      duration: 780,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    });
+
+// 1. Moved text up to sit right below the preview box
+// 1. Moved text up to sit right below the preview box
+    const helperLineOne = this.add
+      .text(panelX, panelY + 55, 'Bursts billow across the belt and hide item silhouettes.', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '26px',
+        color: '#f8fafc',
+        align: 'center',
+        wordWrap: { width: 820 }
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 5);
+
+    const helperLineTwo = this.add
+      .text(panelX, panelY + 95, 'The last two belt slots beside each chest stay visible.', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '26px',
+        color: '#fde68a',
+        align: 'center',
+        wordWrap: { width: 820 }
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 5);
+
+    // 2. Shifted checkbox down to sit between the text and the button
+    let doNotShowAgain = false;
+    const checkboxContainer = this.add.container(640, 505).setDepth(374); // Changed from 492
+    const checkboxBody = this.add.rectangle(-96, 0, 22, 22, 0x0f172a, 0.95).setStrokeStyle(2, 0x94a3b8, 0.95);
+    const checkboxFill = this.add.rectangle(-96, 0, 12, 12, 0x86efac, 1).setVisible(false);
+    const checkboxLabel = this.add
+      .text(16, 0, 'Do not show again', {
+        fontFamily: GAME_UI_FONT,
+        fontSize: '18px',
+        color: '#dbeafe',
+        align: 'center'
+      })
+      .setOrigin(0.5)
+      .setShadow(0, 2, '#000000', 3);
+    const checkboxHit = this.add.zone(0, 0, 300, 34).setInteractive({ useHandCursor: true });
+
+    const syncCheckboxVisual = () => {
+      checkboxFill.setVisible(doNotShowAgain);
+      checkboxBody.setStrokeStyle(2, doNotShowAgain ? 0x86efac : 0x94a3b8, 0.95);
+      checkboxLabel.setColor(doNotShowAgain ? '#bbf7d0' : '#dbeafe');
+    };
+
+    checkboxHit.on('pointerdown', (_pointer, _x, _y, event) => {
+      event?.stopPropagation();
+      doNotShowAgain = !doNotShowAgain;
+      syncCheckboxVisual();
+    });
+
+    checkboxContainer.add([checkboxBody, checkboxFill, checkboxLabel, checkboxHit]);
+    syncCheckboxVisual();
+
+    const disabledButtonStyle = {
+      bodyColor: 0x6b7280,
+      bodyHoverColor: 0x6b7280,
+      glossAlpha: 0.08,
+      textColor: '#e5e7eb',
+      textShadowColor: '#1f2937'
+    };
+    const enabledButtonStyle = {
+      bodyColor: 0x16a34a,
+      bodyHoverColor: 0x22c55e,
+      glossAlpha: 0.14,
+      textColor: '#f0fdf4',
+      textShadowColor: '#064e3b'
+    };
+
+    const acknowledgeTutorial = () => {
+      this.setSteamHazardTutorialDisabled(doNotShowAgain);
+      this.pauseTransitionLock = false;
+      this.acknowledgeSteamHazardTutorial();
+    };
+
+    overlay.add([
+      scrim,
+      softBlurLayer,
+      panelShadow,
+      panel,
+      panelTopStrip,
+      title,
+      subtitle,
+      previewShadow,
+      previewFrame,
+      previewContainer,
+      helperLineOne,
+      helperLineTwo,
+      checkboxContainer
+    ]);
+
+    this.steamTutorialPreviewState = {
+      animatedTargets: [...steamDots, steamMask, clawLine],
+      animatedTweens: [stripeTween, steamPulse, steamMaskTween]
+    };
+
+    // 3. Shifted button down to clear the checkbox area completely
+    let understoodButton = this.createPauseMenuEntry(
+      overlay,
+      'Understood',
+      575, // Changed from 554
+      0x9ca3af,
+      acknowledgeTutorial,
+      disabledButtonStyle
+    );
+
+    this.steamTutorialButtonUnlockEvent = this.time.delayedCall(STEAM_HAZARD_TUTORIAL_BUTTON_LOCK_MS, () => {
+      this.steamTutorialButtonUnlockEvent = null;
+      if (!this.steamTutorialActive || this.steamTutorialOverlay !== overlay || !overlay.active) {
+        return;
+      }
+
+      if (understoodButton?.active) {
+        understoodButton.destroy(true);
+      }
+
+      this.pauseTransitionLock = false;
+      understoodButton = this.createPauseMenuEntry(
+        overlay,
+        'Understood',
+        575, // Changed from 554
+        0x86efac,
+        acknowledgeTutorial,
+        enabledButtonStyle
+      );
+    });
+
+    this.steamTutorialOverlay = overlay;
+    return true;
+  }
+
+  pickSteamTargetLane() {
+    const validLanes = this.laneLayout
+      .map((laneConfig) => this.lanesById[laneConfig.id])
+      .filter((lane) => lane && this.canEnterLane(lane.id));
+
+    if (validLanes.length === 0) {
+      return null;
+    }
+
+    return Phaser.Utils.Array.GetRandom(validLanes);
+  }
+
+  teardownSteamHazardVfx() {
+    if (Array.isArray(this.steamCloudTweens)) {
+      this.steamCloudTweens.forEach((tween) => tween?.remove?.());
+    }
+    this.steamCloudTweens = [];
+
+    if (Array.isArray(this.steamHazardVfxList)) {
+      this.steamHazardVfxList.forEach((obj) => {
+        if (obj && typeof obj.stop === 'function') {
+          obj.stop();
+        }
+        if (obj?.active) {
+          obj.destroy();
+        }
+      });
+    }
+    this.steamHazardVfxList = [];
+    this.steamCloudGraphics = null;
+    this.steamCloudActive = false;
+  }
+
+  startSteamCloud(targetLane) {
+    if (!targetLane || this.steamCloudActive) {
+      return;
+    }
+
+    const bounds = this.getSteamHazardObscureWorldBounds(targetLane);
+    if (!bounds || !Number.isFinite(bounds.width) || bounds.width < 20) {
+      this.resetSteamHazardTimer(STEAM_HAZARD_RETRY_MIN_MS, STEAM_HAZARD_RETRY_MAX_MS);
+      return;
+    }
+
+    this.steamCloudActive = true;
+    this.steamCloudRunToken += 1;
+    const runToken = this.steamCloudRunToken;
+    this.steamCloudTweens = [];
+    this.steamHazardVfxList = [];
+
+    const particleKey = 'fx_dot';
+    const { centerX, laneY, width, height } = bounds;
+    
+    // INCREASE DEPTH: Make sure this is higher than the food items' depth (e.g., 100 or 150)
+    // but lower than your UI depth (which is ~360+)
+    const fogDepth = 150;
+
+    const fogRect = this.add
+      .rectangle(centerX, laneY, width * 1.04, height, 0xd4dce6, 0)
+      .setStrokeStyle(2, 0xf8fafc, 0.2)
+      .setDepth(fogDepth);
+    this.steamHazardVfxList.push(fogRect);
+
+    const addSteamEmitter = (blendMode, frequency, quantity, gravityY, scaleStart, scaleEnd) => {
+      if (!this.textures.exists(particleKey)) {
+        return null;
+      }
+
+      const emitter = this.add.particles(centerX, laneY, particleKey, {
+        blendMode,
+        lifespan: { min: 2200, max: 4400 },
+        speedX: { min: -38, max: 38 },
+        speedY: { min: -86, max: -6 },
+        gravityY,
+        scale: { start: scaleStart, end: scaleEnd },
+        alpha: { start: 0.62, end: 0 },
+        frequency,
+        quantity,
+        emitZone: {
+          type: 'random',
+          source: new Phaser.Geom.Rectangle(-width * 0.5, -height * 0.5, width, height)
+        },
+        tint: [0xffffff, 0xf1f5f9, 0xcbd5e1, 0x94a3b8]
+      });
+      emitter.setDepth(fogDepth + 1);
+      this.steamHazardVfxList.push(emitter);
+      return emitter;
+    };
+
+    addSteamEmitter('SCREEN', 16, 6, -32, 1.05, 3.4);
+    addSteamEmitter('NORMAL', 30, 4, -12, 0.68, 2.2);
+
+    const killIfStale = () => runToken !== this.steamCloudRunToken || !this.steamCloudActive;
+
+    const riseTween = this.tweens.add({
+      targets: fogRect,
+      alpha: { from: 0, to: 0.58 },
+      duration: STEAM_HAZARD_RISE_DURATION_MS,
+      ease: 'Quad.Out',
+      onComplete: () => {
+        if (killIfStale()) {
+          return;
+        }
+
+        this.time.delayedCall(STEAM_HAZARD_VISIBLE_DURATION_MS, () => {
+          if (killIfStale()) {
+            return;
+          }
+
+          const fallTween = this.tweens.add({
+            targets: fogRect,
+            alpha: 0,
+            duration: STEAM_HAZARD_FALL_DURATION_MS,
+            ease: 'Quad.In',
+            onStart: () => {
+              this.steamHazardVfxList.forEach((obj) => {
+                if (obj && obj !== fogRect && typeof obj.stop === 'function') {
+                  obj.stop();
+                }
+              });
+            },
+            onComplete: () => {
+              if (runToken !== this.steamCloudRunToken) {
+                return;
+              }
+              this.teardownSteamHazardVfx();
+              this.resetSteamHazardTimer();
+            }
+          });
+          this.steamCloudTweens.push(fallTween);
+        });
+      }
+    });
+    this.steamCloudTweens.push(riseTween);
+  }
+
+  resetSteamHazardTimer(minMs = STEAM_HAZARD_MIN_COOLDOWN_MS, maxMs = STEAM_HAZARD_MAX_COOLDOWN_MS) {
+    this.steamHazardTimerMs = Phaser.Math.Between(minMs, maxMs);
+  }
+
+  cleanupSteamHazard() {
+    this.steamCloudRunToken += 1;
+    this.teardownSteamHazardVfx();
   }
 
   spawnFoodIfSpace() {
@@ -10718,7 +11968,7 @@ export default class GameScene extends Phaser.Scene {
 
       this.pulseLaneVisual(lane.id, awardScore ? 0.95 : 0.7, !awardScore);
       if (awardScore && this.multiplier >= 3) {
-        this.emitFloatingText(lane.chestX, lane.y - 34, `CHAIN x${this.multiplier}`, '#34d399', 16);
+        this.emitFloatingText(lane.chestX, lane.y - 34, `CHAIN x${this.formatComboValue(this.multiplier)}`, '#34d399', 16);
         this.emitShockRing(lane.chestX, lane.y, 0x34d399, 1.9, 190);
       }
       if (!awardScore) {
@@ -10892,6 +12142,7 @@ export default class GameScene extends Phaser.Scene {
               this.animateLaneItemIntoChest(item, lane, isCorrectLane);
             } else {
               item.state = 'jammed';
+              this.jamCount += 1;
               this.rejectedCount += 1;
               this.breakCombo('jam');
               this.applyItemStateTint(item, 0x64748b);
