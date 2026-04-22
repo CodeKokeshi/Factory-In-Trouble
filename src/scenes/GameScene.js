@@ -9955,6 +9955,10 @@ export default class GameScene extends Phaser.Scene {
       return true;
     }
 
+    if (this.levelMode === 'endless') {
+      return true;
+    }
+
     if (this.levelMode !== 'campaign') {
       return false;
     }
